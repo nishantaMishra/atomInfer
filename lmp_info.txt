@@ -1,0 +1,272 @@
+LAMMPS (22 Jul 2025 - Update 2)
+OMP_NUM_THREADS environment is not set. Defaulting to 1 thread.
+  using 1 OpenMP thread(s) per MPI task
+
+Info-Info-Info-Info-Info-Info-Info-Info-Info-Info-Info
+Printed on Fri Feb 27 18:12:05 2026
+
+LAMMPS version: 22 Jul 2025 / 20250722
+Git info: stable / stable_22Jul2025_update2 / a33449868448baf3c73d8eacdb2d329b13361696
+
+OS information: Linux "Pop!_OS 24.04 LTS" 6.18.7-76061807-generic x86_64
+
+sizeof(smallint): 32-bit
+sizeof(imageint): 32-bit
+sizeof(tagint):   32-bit
+sizeof(bigint):   64-bit
+
+Compiler: GNU C++ 13.3.0 with OpenMP 4.5
+C++ standard: C++17
+Embedded fmt library version: 10.2.0
+Embedded JSON class version: 3.12.0
+
+Active compile time flags:
+
+-DLAMMPS_GZIP
+-DLAMMPS_PNG
+-DLAMMPS_JPEG
+-DLAMMPS_FFMPEG
+-DLAMMPS_SMALLBIG
+
+Available compression formats:
+
+Extension: .gz     Command: gzip
+Extension: .bz2    Command: bzip2
+Extension: .zst    Command: zstd
+Extension: .xz     Command: xz
+Extension: .lzma   Command: xz
+Extension: .lz4    Command: lz4
+
+
+Installed packages:
+
+EXTRA-DUMP EXTRA-FIX KSPACE MANYBODY MOLECULE PYTHON REAXFF RIGID 
+
+Accelerator configuration:
+
+
+Memory allocation information (MPI rank 0):
+
+Total dynamically allocated memory: 0.02355 Mbyte
+Current reserved memory pool size: 7.176 Mbyte
+Maximum resident set size: 36.4 Mbyte
+
+Communication information:
+MPI library level: MPI v3.1
+MPI version: Open MPI v4.1.6, package: Debian OpenMPI, ident: 4.1.6, repo rev: v4.1.6, Sep 30, 2023
+Comm style = brick,  Comm layout = uniform
+Communicate velocities for ghost atoms = no
+Nprocs = 1,   Nthreads = 1
+
+FFT information:
+FFT precision  = double
+FFT engine  = mpiFFT
+FFT library = FFTW3 with threads
+
+System information:
+Units         = lj
+Atom style    = atomic
+Atom map      = none
+Atoms     =            0,  types =        0,  style = none
+Atoms with atom IDs
+Kspace style = none
+
+Box has not yet been created
+
+Current timestep number = 0
+Current timestep size = 0.005
+
+Group information:
+Group[ 0]:     all              (static)
+
+Region information:
+
+Compute information:
+Compute[  0]:  thermo_temp,      style = temp,             group = all
+Compute[  1]:  thermo_press,     style = pressure,         group = all
+Compute[  2]:  thermo_pe,        style = pe,               group = all
+
+Dump information:
+
+Fix information:
+
+Variable information:
+
+Total time information (MPI rank 0):
+  CPU time:    0:00:00
+ Wall time:    0:00:00
+
+Styles information:
+
+Atom styles:
+
+angle           atomic          body            bond            charge          
+ellipsoid       full            hybrid          line            molecular       
+sphere          template        tri             
+
+
+
+Integrate styles:
+
+respa           verlet          
+
+
+
+Minimize styles:
+
+cg              fire            fire/old        hftn            quickmin        
+sd              
+
+
+
+Pair styles:
+
+adp             airebo          airebo/morse    atm             bop             
+born            born/coul/long  born/coul/msm   buck            buck/coul/cut   
+buck/coul/long  buck/coul/msm   buck/long/coul/long             comb            
+comb3           coul/cut        coul/debye      coul/dsf        coul/long       
+coul/msm        coul/streitz    coul/wolf       eam             eam/alloy       
+eam/cd          eam/cd/old      eam/fs          eam/he          edip            
+edip/multi      eim             extep           gw              gw/zbl          
+hbond/dreiding/lj               hbond/dreiding/morse            hybrid          
+hybrid/molecular                hybrid/molecular/omp            hybrid/omp      
+hybrid/overlay  hybrid/overlay/omp              hybrid/scaled   
+hybrid/scaled/omp               lcbop           lj/charmm/coul/charmm           
+lj/charmm/coul/charmm/implicit  lj/charmm/coul/long             
+lj/charmm/coul/msm              lj/charmmfsw/coul/charmmfsh     
+lj/charmmfsw/coul/long          lj/cut          lj/cut/coul/cut lj/cut/coul/long                
+lj/cut/coul/msm lj/cut/tip4p/cut                lj/cut/tip4p/long               
+lj/expand       lj/long/coul/long               lj/long/tip4p/long              
+local/density   meam/c          meam/spline     meam/sw/spline  mesont/tpm      
+morse           nb3b/harmonic   nb3b/screened   polymorphic     python          
+reax            reax/c          reaxff          rebo            rebomos         
+soft            sw              sw/angle/table  sw/mod          table           
+tersoff         tersoff/mod     tersoff/mod/c   tersoff/table   tersoff/zbl     
+threebody/table tip4p/cut       tip4p/long      vashishta       vashishta/table 
+yukawa          zbl             zero            
+
+
+
+Bond styles:
+
+fene            fene/expand     gromos          harmonic        hybrid          
+morse           quartic         table           zero            
+
+
+
+Angle styles:
+
+charmm          cosine          cosine/squared  harmonic        hybrid          
+table           zero            
+
+
+
+Dihedral styles:
+
+charmm          charmmfsw       harmonic        hybrid          multi/harmonic  
+opls            table           zero            
+
+
+
+Improper styles:
+
+cvff            harmonic        hybrid          umbrella        zero            
+
+
+
+KSpace styles:
+
+ewald           ewald/dipole    ewald/dipole/spin               ewald/disp      
+ewald/disp/dipole               msm             msm/cg          pppm            
+pppm/cg         pppm/dipole     pppm/dipole/spin                pppm/disp       
+pppm/disp/tip4p pppm/stagger    pppm/tip4p      zero            
+
+
+
+Fix styles:
+
+acks2/reax      acks2/reaxff    adapt           addforce        addtorque       
+ave/atom        ave/chunk       ave/correlate   ave/correlate/long              
+ave/grid        ave/histo       ave/histo/weight                ave/moments     
+ave/spatial     ave/spatial/sphere              ave/time        aveforce        
+balance         box/relax       cmap            controller      deform          
+deform/pressure deposit         drag            dt/reset        efield          
+efield/tip4p    ehex            electron/stopping               
+electron/stopping/fit           enforce2d       evaporate       external        
+ffl             filter/corotate flow/gauss      gjf             gld             
+gle             gravity         halt            heat            indent          
+langevin        lb/pc           lb/rigid/pc/sphere              lineforce       
+momentum        momentum/chunk  move            nonaffine/displacement          
+nph             nph/sphere      npt             npt/cauchy      npt/sphere      
+numdiff         numdiff/virial  nve             nve/limit       nve/noforce     
+nve/sphere      nvk             nvt             nvt/sllod       nvt/sphere      
+oneway          pafi            pair            planeforce      press/berendsen 
+press/langevin  print           property/atom   python          python/invoke   
+python/move     qeq/comb        qeq/reax        qeq/reaxff      qeq/rel/reaxff  
+qtpie/reaxff    rattle          reax/c/bonds    reax/c/species  reaxff/bonds    
+reaxff/species  recenter        restrain        rhok            rigid           
+rigid/nph       rigid/nph/small rigid/npt       rigid/npt/small rigid/nve       
+rigid/nve/small rigid/nvt       rigid/nvt/small rigid/small     set             
+setforce        shake           smd             spring          spring/chunk    
+spring/rg       spring/self     store/force     store/state     temp/berendsen  
+temp/csld       temp/csvr       temp/rescale    thermal/conductivity            
+ti/spring       tmd             ttm             ttm/grid        ttm/mod         
+tune/kspace     vector          viscosity       viscous         viscous/sphere  
+wall/ees        wall/flow       wall/harmonic   wall/lj1043     wall/lj126      
+wall/lj93       wall/morse      wall/reflect    wall/reflect/stochastic         
+wall/region     wall/region/ees wall/table      
+
+
+
+Compute styles:
+
+aggregate/atom  angle           angle/local     angmom/chunk    bond            
+bond/local      centro/atom     centroid/stress/atom            chunk/atom      
+chunk/spread/atom               cluster/atom    cna/atom        com             
+com/chunk       coord/atom      count/type      dihedral        dihedral/local  
+dipole          dipole/chunk    displace/atom   erotate/rigid   erotate/sphere  
+erotate/sphere/atom             fragment/atom   global/atom     group/group     
+gyration        gyration/chunk  heat/flux       improper        improper/local  
+inertia/chunk   ke              ke/atom         ke/rigid        mesont          
+msd             msd/chunk       omega/chunk     orientorder/atom                
+pair            pair/local      pe              pe/atom         pressure        
+property/atom   property/chunk  property/grid   property/local  rdf             
+reaxff/atom     reduce          reduce/chunk    reduce/region   rigid/local     
+slice           stress/atom     temp            temp/chunk      temp/com        
+temp/deform     temp/partial    temp/profile    temp/ramp       temp/region     
+temp/sphere     torque/chunk    vacf            vacf/chunk      vcm/chunk       
+
+
+
+Region styles:
+
+block           cone            cylinder        ellipsoid       intersect       
+plane           prism           sphere          union           
+
+
+
+Dump styles:
+
+atom            atom/mpiio      cfg             cfg/mpiio       custom          
+custom/mpiio    dcd             extxyz          grid            grid/vtk        
+image           local           movie           xtc             xyz             
+xyz/mpiio       yaml            
+
+
+
+Command styles (add-on input script commands):
+
+angle_write     balance         box             change_box      create_atoms    
+create_bonds    create_box      delete_atoms    delete_bonds    dihedral_write  
+displace_atoms  info            kim_init        kim_interactions                
+kim_param       kim_property    kim_query       message         minimize        
+read_data       read_dump       read_restart    replicate       rerun           
+reset_atom_ids  reset_ids       reset_mol_ids   run             server          
+set             velocity        write_coeff     write_data      write_dump      
+write_restart   
+
+
+
+Info-Info-Info-Info-Info-Info-Info-Info-Info-Info-Info
+
+Total wall time: 0:00:00

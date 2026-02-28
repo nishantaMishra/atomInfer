@@ -1,0 +1,4 @@
+.env
+__pycache__/
+atomInfer_output/
+uploads/

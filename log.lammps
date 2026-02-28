@@ -1,0 +1,74 @@
+LAMMPS (22 Jul 2025 - Update 2)
+OMP_NUM_THREADS environment is not set. Defaulting to 1 thread.
+  using 1 OpenMP thread(s) per MPI task
+units metal
+atom_style charge
+boundary p p p
+lattice fcc 4.0
+Lattice spacing in x,y,z = 4 4 4
+region box block 0 2 0 2 0 2
+create_box 3 box
+Created orthogonal box = (0 0 0) to (8 8 8)
+  1 by 1 by 1 MPI processor grid
+create_atoms 1 box
+Created 32 atoms
+  using lattice units in orthogonal box = (0 0 0) to (8 8 8)
+  create_atoms CPU = 0.000 seconds
+mass 1 6.941
+mass 2 54.94
+mass 3 16.0
+pair_style meam
+pair_coeff * * /home/yeatanir/Hackathon/potentials/library_LiMnO.meam Li Mn O /home/yeatanir/Hackathon/potentials/library_LiMnO.meam.alloy Li Mn O
+run 0
+WARNING: No fixes with time integration, atoms won't move
+For more information see https://docs.lammps.org/err0028 (src/verlet.cpp:60)
+Neighbor list info ...
+  update: every = 1 steps, delay = 0 steps, check = yes
+  max neighbors/atom: 2000, page size: 100000
+  master list distance cutoff = 6.8
+  ghost atom cutoff = 6.8
+  binsize = 3.4, bins = 3 3 3
+  2 neighbor lists, perpetual/occasional/extra = 2 0 0
+  (1) pair meam, perpetual
+      attributes: full, newton on
+      pair build: full/bin/atomonly
+      stencil: full/bin/3d
+      bin: standard
+  (2) pair meam, perpetual, half/full from (1)
+      attributes: half, newton on
+      pair build: halffull/newton
+      stencil: none
+      bin: none
+Per MPI rank memory allocation (min/avg/max) = 8.918 | 8.918 | 8.918 Mbytes
+   Step          Temp          E_pair         E_mol          TotEng         Press     
+         0   0             -50.244079      0             -50.244079      58624.852    
+Loop time of 5.35e-07 on 1 procs for 0 steps with 32 atoms
+
+0.0% CPU use with 1 MPI tasks x 1 OpenMP threads
+
+MPI task timing breakdown:
+Section |  min time  |  avg time  |  max time  |%varavg| %total
+---------------------------------------------------------------
+Pair    | 0          | 0          | 0          |   0.0 |  0.00
+Neigh   | 0          | 0          | 0          |   0.0 |  0.00
+Comm    | 0          | 0          | 0          |   0.0 |  0.00
+Output  | 0          | 0          | 0          |   0.0 |  0.00
+Modify  | 0          | 0          | 0          |   0.0 |  0.00
+Other   |            | 5.35e-07   |            |       |100.00
+
+Nlocal:             32 ave          32 max          32 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Nghost:            633 ave         633 max         633 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+Neighs:           1248 ave        1248 max        1248 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+FullNghs:         2496 ave        2496 max        2496 min
+Histogram: 1 0 0 0 0 0 0 0 0 0
+
+Total # of neighbors = 2496
+Ave neighs/atom = 78
+Neighbor list builds = 0
+Dangerous builds = 0
+print "meam/c potential test PASSED"
+meam/c potential test PASSED
+Total wall time: 0:00:00
