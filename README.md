@@ -1,6 +1,6 @@
 # AtomInfer
 
-![AtomInfer logo](images/logo.pnglogo.png)
+![AtomInfer logo](images/logo.png)
 
 ![Workflow diagram](images/work-flow.png)
 
