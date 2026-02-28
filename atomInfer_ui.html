@@ -154,6 +154,10 @@ canvas.mini-chart{width:100%;height:100%;display:block;}
 ::-webkit-scrollbar-track{background:transparent;}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px;}
 .demo-banner{position:relative;z-index:10;padding:8px 2rem;background:rgba(247,183,49,0.06);border-bottom:1px solid rgba(247,183,49,0.2);display:flex;align-items:center;gap:10px;font-family:'Space Mono',monospace;font-size:12.1px;color:var(--warn);}
+#hrmcOverlay{position:absolute;top:10px;left:10px;display:none;flex-direction:column;gap:4px;z-index:10;pointer-events:none;}
+.hrmc-stat{font-family:'Space Mono',monospace;font-size:11px;padding:3px 8px;border-radius:4px;background:rgba(7,10,14,0.85);border:1px solid rgba(0,229,200,0.35);color:var(--accent2);backdrop-filter:blur(6px);}
+.hrmc-btn{border-color:var(--accent2)!important;color:var(--accent2)!important;background:var(--glow2)!important;}
+.hrmc-btn:hover{background:rgba(0,229,200,0.18)!important;box-shadow:0 0 20px var(--glow2)!important;}
 </style>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
@@ -217,6 +221,18 @@ canvas.mini-chart{width:100%;height:100%;display:block;}
       <button class="run-btn" id="runBtn" onclick="startAnalysis()">▶ RUN ATOMINFER</button>
     </div>
     <div class="section">
+      <div class="section-label">HRMC Refinement</div>
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        <div style="display:grid;grid-template-columns:auto 1fr;gap:6px;align-items:center;">
+          <label style="font-family:'Space Mono',monospace;font-size:11px;color:var(--text-dim);">Ce %</label>
+          <input id="hrmcCePct" type="number" min="0" max="20" step="0.5" value="5" style="padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--text);font-family:'Space Mono',monospace;font-size:12px;">
+          <label style="font-family:'Space Mono',monospace;font-size:11px;color:var(--text-dim);">Steps</label>
+          <input id="hrmcSteps" type="number" min="10" max="500" step="10" value="50" style="padding:6px 8px;border:1px solid var(--border);border-radius:5px;background:transparent;color:var(--text);font-family:'Space Mono',monospace;font-size:12px;">
+        </div>
+        <button class="run-btn hrmc-btn" id="hrmcBtn" onclick="runHRMC()">⚡ REFINE STRUCTURE</button>
+      </div>
+    </div>
+    <div class="section">
       <div class="section-label">Agent Settings</div>
       <div style="font-family:'Space Mono',monospace;font-size:11px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;">
         <span style="color:var(--text-dim);">LLM</span><span style="color:var(--text);">llama-3.3-70b</span>
@@ -245,6 +261,12 @@ canvas.mini-chart{width:100%;height:100%;display:block;}
         <button onclick="structResetCamera()" title="Reset view">↺</button>
         <button onclick="structScreenshot()" title="Screenshot">📷</button>
         <button onclick="structExportJSON()" title="Export JSON">⬇</button>
+      </div>
+      <div id="hrmcOverlay">
+        <div class="hrmc-stat" id="hrmcStep">Step: 0/0</div>
+        <div class="hrmc-stat" id="hrmcRfactor">R: —</div>
+        <div class="hrmc-stat" id="hrmcEnergy">E/atom: —</div>
+        <div class="hrmc-stat" id="hrmcXce">Ce: —</div>
       </div>
       <div id="structLegend"></div>
       <canvas id="axisCanvas"></canvas>
@@ -1079,6 +1101,138 @@ async function startAnalysis(){
   document.getElementById('runBtn').disabled=false;
   document.getElementById('runBtn').textContent='↺ RUN AGAIN';
 }
+
+// ====== HRMC LIVE REFINEMENT ======
+let hrmcWs = null;
+let hrmcRunning = false;
+
+async function runHRMC() {
+  if (hrmcRunning) return;
+  hrmcRunning = true;
+
+  const btn = document.getElementById('hrmcBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ LOADING STRUCTURE...';
+
+  const ce_pct = parseFloat(document.getElementById('hrmcCePct').value) || 5.0;
+  const n_steps = parseInt(document.getElementById('hrmcSteps').value) || 50;
+
+  // Load and display initial CIF structure in viewer
+  try {
+    const r = await fetch('/api/cif_structure?path=./LiMn2O4.cif');
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    const viewport = document.getElementById('structViewport');
+    const emptyEl = document.getElementById('structEmpty');
+    if (emptyEl) emptyEl.style.display = 'none';
+    const lo = document.getElementById('structLoadOverlay');
+    if (lo) lo.remove();
+    if (crystalViewer) { try { crystalViewer.dispose(); } catch(e) {} }
+    crystalViewer = new CrystalViewer(viewport);
+    _structData = data;
+    const elems = crystalViewer.load(data);
+    const ctrl = document.getElementById('structControls');
+    if (ctrl) ctrl.style.display = 'flex';
+    const ac = document.getElementById('axisCanvas');
+    if (ac) ac.style.display = 'block';
+    const leg = document.getElementById('structLegend');
+    if (leg && elems) {
+      leg.style.display = 'flex';
+      leg.innerHTML = elems.map(el => {
+        const c = CPK_COLORS[el] || CPK_COLORS.DEFAULT;
+        const hex = '#' + c.toString(16).padStart(6, '0');
+        return `<div class="leg-pill"><div class="leg-dot" style="background:${hex};"></div><span class="leg-label">${el}</span></div>`;
+      }).join('');
+    }
+    const badge = document.getElementById('structBadge');
+    if (badge) { badge.textContent = 'LiMn2O4'; badge.className = 'panel-badge active'; }
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '⚡ REFINE STRUCTURE';
+    hrmcRunning = false;
+    addMsg('agent', 'ATOMINFER AGENT', '🤖', `Error loading CIF: ${e.message}`);
+    return;
+  }
+
+  btn.textContent = '⏳ STARTING HRMC...';
+  addMsg('agent', 'ATOMINFER AGENT', '🤖',
+    `Starting HRMC refinement — Ce ${ce_pct}%, ${n_steps} steps on LiMn₂O₄ structure.`);
+
+  let runId;
+  try {
+    const resp = await fetch('/api/hrmc/start', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({cif_path: './LiMn2O4.cif', ce_pct, n_steps})
+    });
+    const j = await resp.json();
+    if (j.error) throw new Error(j.error);
+    runId = j.run_id;
+  } catch(e) {
+    btn.disabled = false;
+    btn.textContent = '⚡ REFINE STRUCTURE';
+    hrmcRunning = false;
+    addMsg('agent', 'ATOMINFER AGENT', '🤖', `HRMC start error: ${e.message}`);
+    return;
+  }
+
+  // Show HRMC stats overlay
+  const overlay = document.getElementById('hrmcOverlay');
+  if (overlay) overlay.style.display = 'flex';
+  btn.textContent = '⏳ RUNNING HRMC...';
+
+  // Open WebSocket stream
+  const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${wsProto}//${location.host}/api/hrmc/${runId}/stream`);
+  hrmcWs = ws;
+
+  ws.onmessage = (event) => {
+    const msg = JSON.parse(event.data);
+    if (msg.type === 'status') {
+      btn.textContent = `⏳ ${msg.message.slice(0, 28)}`;
+    } else if (msg.type === 'frame') {
+      // Refresh structure in viewer
+      if (msg.structure) {
+        _structData = msg.structure;
+        crystalViewer.load(msg.structure);
+      }
+      // Update stats overlay
+      const cost = msg.cost || {};
+      const pct = Math.round((msg.step / msg.n_steps) * 100);
+      document.getElementById('hrmcStep').textContent = `Step ${msg.step}/${msg.n_steps} (${pct}%)`;
+      document.getElementById('hrmcRfactor').textContent = `R: ${((cost.R_factor||0)*100).toFixed(1)}%`;
+      document.getElementById('hrmcEnergy').textContent = `E/atom: ${(cost.E_per_atom||0).toFixed(3)} eV`;
+      document.getElementById('hrmcXce').textContent = `Ce: ${((cost.x_Ce||0)*100).toFixed(1)}%`;
+      if (cost.R_factor != null) updateRFactor(cost.R_factor);
+      btn.textContent = `⏳ STEP ${msg.step}/${msg.n_steps}`;
+    } else if (msg.type === 'done') {
+      const fc = msg.final_cost || {};
+      if (overlay) setTimeout(() => { overlay.style.display = 'none'; }, 4000);
+      btn.disabled = false;
+      btn.textContent = '⚡ REFINE AGAIN';
+      hrmcRunning = false;
+      addMsg('agent', 'ATOMINFER AGENT', '🤖',
+        `<strong>HRMC complete.</strong> Final R=${((fc.R_factor||0)*100).toFixed(1)}% · E/atom=${(fc.E_per_atom||0).toFixed(3)} eV · Ce=${((fc.x_Ce||0)*100).toFixed(1)}%`);
+    }
+  };
+
+  ws.onerror = () => {
+    if (overlay) overlay.style.display = 'none';
+    btn.disabled = false;
+    btn.textContent = '⚡ REFINE STRUCTURE';
+    hrmcRunning = false;
+  };
+
+  ws.onclose = () => {
+    if (hrmcRunning) {
+      hrmcRunning = false;
+      btn.disabled = false;
+      btn.textContent = '⚡ REFINE STRUCTURE';
+      if (overlay) overlay.style.display = 'none';
+    }
+  };
+}
+// ====== END HRMC ======
 </script>
 </body>
 </html>
