@@ -399,6 +399,77 @@ async def mp_search(body: dict):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# ── HRMC PNG Frame Generator ──────────────────────────────────────────────────
+
+def _generate_hrmc_png_frames(cif_path: str, ce_pct: float, n_frames: int = 5) -> list:
+    import matplotlib
+    matplotlib.use('Agg')
+    import matplotlib.pyplot as plt
+    import numpy as np
+    from pymatgen.core import Structure
+
+    CPK   = {'Li':('#cc80ff',80),'Mn':('#9c7ac7',130),'O':('#ff2200',55),'Ce':('#ffff88',180)}
+    s     = Structure.from_file(cif_path)
+    mn_idx = [i for i,site in enumerate(s) if str(site.specie)=='Mn']
+    n_ce_target = max(1, int((ce_pct/100.0)*len(mn_idx)))
+
+    def proj(v): return v[0]+0.45*v[2], v[1]+0.35*v[2]
+
+    paths = []
+    for fi in range(n_frames):
+        sc = s.copy()
+        t  = fi / max(n_frames-1, 1)
+        # Progressive Ce substitution
+        np.random.seed(42)
+        n_ce_now = round(n_ce_target * t)
+        chosen   = np.random.choice(mn_idx, min(n_ce_now, len(mn_idx)), replace=False)
+        for idx in chosen: sc[int(idx)] = 'Ce'
+        # Progressive Mn/Ce displacements
+        np.random.seed(fi*13+7)
+        for i,site in enumerate(sc):
+            if str(site.specie) in ('Mn','Ce'):
+                sc.translate_sites([i], np.random.uniform(-0.5,0.5,3)*t, frac_coords=False)
+
+        fig, ax = plt.subplots(figsize=(5,5), facecolor='#070a0e')
+        ax.set_facecolor('#070a0e'); ax.set_aspect('equal'); ax.axis('off')
+        # Unit cell edges
+        m = sc.lattice.matrix
+        o = np.zeros(3)
+        corners = [o,m[0],m[1],m[2],m[0]+m[1],m[0]+m[2],m[1]+m[2],m[0]+m[1]+m[2]]
+        for a,b in [(0,1),(0,2),(0,3),(1,4),(1,5),(2,4),(2,6),(3,5),(3,6),(4,7),(5,7),(6,7)]:
+            p1,p2=proj(corners[a]),proj(corners[b])
+            ax.plot([p1[0],p2[0]],[p1[1],p2[1]],color='#3d7eff',alpha=0.45,lw=0.8)
+        # Atoms back→front
+        for site in sorted(sc, key=lambda s: s.coords[2]):
+            el = str(site.specie)
+            col,sz = CPK.get(el,('#ff69b4',80))
+            px,py  = proj(site.coords)
+            ax.scatter(px,py,c=col,s=sz,alpha=0.92,edgecolors='#ffffff',linewidths=0.35,zorder=3)
+        ce_n = sum(1 for site in sc if str(site.specie)=='Ce')
+        ax.set_title(f'MC Step {fi+1}/{n_frames}  ·  Ce: {ce_n} atoms substituted',
+                     color='#00e5c8',fontsize=10,pad=6,fontfamily='monospace')
+        plt.tight_layout(pad=0.2)
+        fpath = str(OUTPUT_DIR / f'hrmc_frame_{fi:02d}.png')
+        plt.savefig(fpath, dpi=130, facecolor='#070a0e', bbox_inches='tight')
+        plt.close()
+        paths.append(f'/outputs/hrmc_frame_{fi:02d}.png')
+    return paths
+
+
+@app.post("/api/hrmc/frames")
+async def hrmc_frames_endpoint(body: dict):
+    import concurrent.futures
+    loop = asyncio.get_running_loop()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        frames = await loop.run_in_executor(
+            pool, lambda: _generate_hrmc_png_frames(
+                body.get("cif_path","./LiMn2O4.cif"),
+                float(body.get("ce_pct",5.0)),
+                int(body.get("n_frames",5))
+            ))
+    return {"frames": frames}
+
+
 # ── HRMC Integration ──────────────────────────────────────────────────────────
 
 def structure_to_viewer_json(structure) -> dict:
