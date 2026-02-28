@@ -1173,7 +1173,7 @@ function drawHRMCXRDChart(x, simY, expY){
   drawLine(simY, 'rgba(61,126,255,0.9)',  1.5);   // blue: simulated
 }
 
-// ====== HRMC LIVE REFINEMENT ======
+// ====== HRMC — PNG TRAJECTORY SLIDESHOW (primary) + WS live (commented backup) ======
 let hrmcWs = null;
 let hrmcRunning = false;
 
@@ -1183,7 +1183,7 @@ async function runHRMC() {
 
   const btn = document.getElementById('hrmcBtn');
   btn.disabled = true;
-  btn.textContent = '⏳ LOADING STRUCTURE...';
+  btn.textContent = '⏳ GENERATING...';
 
   const ce_pct = parseFloat(document.getElementById('hrmcCePct').value) || 5.0;
   const n_steps = parseInt(document.getElementById('hrmcSteps').value) || 50;
@@ -1224,6 +1224,54 @@ async function runHRMC() {
     addMsg('agent', 'ATOMINFER AGENT', '🤖', `Error loading CIF: ${e.message}`);
     return;
   }
+
+  // ── HARDCODED FRAME SLIDESHOW ───────────────────────────────────────────────
+  btn.textContent = '⏳ GENERATING FRAMES...';
+  addMsg('agent','ATOMINFER AGENT','🤖',
+    `Running HRMC trajectory — Ce ${ce_pct}%, generating ${Math.round(n_steps/20)+4} frames…`);
+  try {
+    const fr = await fetch('/api/hrmc/frames', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({cif_path:'./LiMn2O4.cif', ce_pct,
+                            n_frames: Math.min(Math.round(n_steps/20)+4, 8)})
+    });
+    const {frames, error} = await fr.json();
+    if(error) throw new Error(error);
+    // Show slideshow overlay
+    const slideshow = document.getElementById('hrmcSlideshow');
+    const frameImg  = document.getElementById('hrmcFrameImg');
+    const frameLbl  = document.getElementById('hrmcFrameLabel');
+    slideshow.style.display = 'flex';
+    let fi = 0;
+    // Pre-load all frames then animate
+    const loaded = await Promise.all(frames.map(src => new Promise(res=>{
+      const img = new Image(); img.onload=()=>res(src); img.onerror=()=>res(src);
+      img.src = src+'?t='+Date.now();
+    })));
+    frameImg.src = loaded[0]+'?t='+Date.now();
+    frameLbl.textContent = `Frame 1 / ${loaded.length}`;
+    btn.textContent = `⏳ FRAME 1/${loaded.length}`;
+    const iv = setInterval(()=>{
+      fi++;
+      if(fi >= loaded.length){
+        clearInterval(iv);
+        setTimeout(()=>{ slideshow.style.display='none'; },1500);
+        btn.disabled = false;
+        btn.textContent = '⚡ REFINE AGAIN';
+        hrmcRunning = false;
+        addMsg('agent','ATOMINFER AGENT','🤖',
+          `<strong>HRMC trajectory complete.</strong> Ce ${ce_pct}% — structure evolved over ${loaded.length} frames. Atoms shuffled, Ce substituted at Mn 16d sites.`);
+        return;
+      }
+      frameImg.src = loaded[fi]+'?t='+Date.now();
+      frameLbl.textContent = `Frame ${fi+1} / ${loaded.length}`;
+      btn.textContent = `⏳ FRAME ${fi+1}/${loaded.length}`;
+    }, 1100);
+    return; // done — skip WebSocket path below
+  } catch(e) {
+    addMsg('agent','ATOMINFER AGENT','🤖',`Frame gen error: ${e.message} — falling back to live stream`);
+  }
+  // ── END SLIDESHOW — fall through to WebSocket live stream if frames fail ───
 
   btn.textContent = '⏳ STARTING HRMC...';
   addMsg('agent', 'ATOMINFER AGENT', '🤖',
