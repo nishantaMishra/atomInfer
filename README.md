@@ -1,6 +1,10 @@
 # AtomInfer
 
-AtomInfer is an interactive GUI web application for predicting and inspecting atomistic material structures from experimental data (e.g., XRD). It combines an agent-driven pipeline (parsing XRD, Raman, TGE, PDF data from experiments and giving out the complete structure of matrial that can be then used for Atomistic simulations. 
+![AtomInfer logo](logo.png)
+
+![Workflow diagram](work-flow.png)
+
+AtomInfer is an interactive GUI web application for predicting and inspecting atomistic material structures from experimental data (for example, XRD). It combines an agent-driven pipeline (parsing experimental inputs, querying Materials Project, and building/refining atomistic models) and produces structural models that can be used for simulations and refinement.
 
 This repository contains the frontend single-file UI and a FastAPI backend that proxies Materials Project requests and runs analysis/refinement jobs.
 

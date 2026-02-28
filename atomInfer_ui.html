@@ -875,6 +875,45 @@ class CrystalViewer {
     this.controls.target.copy(this._center);
     this.controls.update();
   }
+  // Rebuild scene but keep camera exactly where it is
+  loadSites(data){
+    // Save camera before clear()
+    const camPos = this.camera.position.clone();
+    const tgt    = this.controls.target.clone();
+    this.clear();
+    // Rebuild lattice box
+    const mat=data.lattice.matrix;
+    const va=new THREE.Vector3(mat[0][0],mat[0][1],mat[0][2]);
+    const vb=new THREE.Vector3(mat[1][0],mat[1][1],mat[1][2]);
+    const vc=new THREE.Vector3(mat[2][0],mat[2][1],mat[2][2]);
+    const o=new THREE.Vector3();
+    const corners=[o.clone(),va.clone(),vb.clone(),vc.clone(),
+                   va.clone().add(vb),va.clone().add(vc),
+                   vb.clone().add(vc),va.clone().add(vb).add(vc)];
+    const edges=[[0,1],[0,2],[0,3],[1,4],[1,5],[2,4],[2,6],[3,5],[3,6],[4,7],[5,7],[6,7]];
+    const pts=[]; for(const[i,j]of edges){pts.push(corners[i]);pts.push(corners[j]);}
+    this.scene.add(new THREE.LineSegments(
+      new THREE.BufferGeometry().setFromPoints(pts),
+      new THREE.LineBasicMaterial({color:0x3d7eff,opacity:0.75,transparent:true})));
+    // Add atoms — fresh geometry per mesh to avoid shared-dispose bug
+    const elemSet=new Set();
+    for(const site of data.sites){
+      const elem=site.species?.[0]?.element||'X';
+      elemSet.add(elem);
+      const color=(CPK_COLORS[elem]||CPK_COLORS.DEFAULT);
+      const radius=(COVALENT_RADII[elem]||COVALENT_RADII.DEFAULT)*0.4;
+      const mesh=new THREE.Mesh(
+        new THREE.SphereGeometry(radius,14,14),
+        new THREE.MeshPhongMaterial({color,shininess:80}));
+      const[x,y,z]=site.xyz; mesh.position.set(x,y,z);
+      this.scene.add(mesh);
+    }
+    // Restore camera — no jump
+    this.camera.position.copy(camPos);
+    this.controls.target.copy(tgt);
+    this.controls.update();
+    return[...elemSet];
+  }
   dispose(){ this._ro.disconnect(); cancelAnimationFrame(this._raf); this.renderer.dispose(); if(this._axisRenderer){this._axisRenderer.dispose();} }
 }
 
@@ -1102,6 +1141,33 @@ async function startAnalysis(){
   document.getElementById('runBtn').textContent='↺ RUN AGAIN';
 }
 
+// Draw real XRD pattern from HRMC frame data
+function drawHRMCXRDChart(x, simY, expY){
+  const canvas = document.getElementById('xrdChart');
+  if(!canvas) return;
+  const dpr = window.devicePixelRatio||1;
+  canvas.width  = canvas.offsetWidth  * dpr;
+  canvas.height = canvas.offsetHeight * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  const W = canvas.offsetWidth, H = canvas.offsetHeight;
+  ctx.clearRect(0,0,W,H);
+  if(!x || !simY || !expY || x.length === 0) return;
+  const xMin = x[0], xRange = x[x.length-1] - x[0];
+  const maxVal = Math.max(...simY, ...expY, 1);
+  function drawLine(yArr, color, lw){
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = lw;
+    for(let i=0;i<x.length;i++){
+      const px = ((x[i]-xMin)/xRange)*W;
+      const py = H-4-(yArr[i]/maxVal)*(H-8);
+      i===0 ? ctx.moveTo(px,py) : ctx.lineTo(px,py);
+    }
+    ctx.stroke();
+  }
+  drawLine(expY, 'rgba(247,183,49,0.65)', 1.5);  // yellow: target
+  drawLine(simY, 'rgba(61,126,255,0.9)',  1.5);   // blue: simulated
+}
+
 // ====== HRMC LIVE REFINEMENT ======
 let hrmcWs = null;
 let hrmcRunning = false;
@@ -1189,14 +1255,28 @@ async function runHRMC() {
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
     if (msg.type === 'status') {
-      btn.textContent = `⏳ ${msg.message.slice(0, 28)}`;
+      btn.textContent = `⏳ ${msg.message.slice(0, 30)}`;
+
     } else if (msg.type === 'frame') {
-      // Refresh structure in viewer
-      if (msg.structure) {
+      // Full frame: update 3D viewer (loadSites preserves camera angle)
+      if (msg.structure && crystalViewer) {
         _structData = msg.structure;
-        crystalViewer.load(msg.structure);
+        const elems = crystalViewer.loadSites(msg.structure);
+        // Sync element legend
+        const leg = document.getElementById('structLegend');
+        if (leg && elems) {
+          leg.innerHTML = elems.map(el => {
+            const c = CPK_COLORS[el]||CPK_COLORS.DEFAULT;
+            const hex = '#'+c.toString(16).padStart(6,'0');
+            return `<div class="leg-pill"><div class="leg-dot" style="background:${hex};"></div><span class="leg-label">${el}</span></div>`;
+          }).join('');
+        }
       }
-      // Update stats overlay
+      // Real XRD chart
+      if (msg.pattern) {
+        drawHRMCXRDChart(msg.pattern.x, msg.pattern.sim_y, msg.pattern.exp_y);
+      }
+      // Update stats (every frame)
       const cost = msg.cost || {};
       const pct = Math.round((msg.step / msg.n_steps) * 100);
       document.getElementById('hrmcStep').textContent = `Step ${msg.step}/${msg.n_steps} (${pct}%)`;
@@ -1205,6 +1285,17 @@ async function runHRMC() {
       document.getElementById('hrmcXce').textContent = `Ce: ${((cost.x_Ce||0)*100).toFixed(1)}%`;
       if (cost.R_factor != null) updateRFactor(cost.R_factor);
       btn.textContent = `⏳ STEP ${msg.step}/${msg.n_steps}`;
+
+    } else if (msg.type === 'progress') {
+      // Lightweight tick — just update step counter and stats
+      const cost = msg.cost || {};
+      const pct = Math.round((msg.step / msg.n_steps) * 100);
+      document.getElementById('hrmcStep').textContent = `Step ${msg.step}/${msg.n_steps} (${pct}%)`;
+      document.getElementById('hrmcRfactor').textContent = `R: ${((cost.R_factor||0)*100).toFixed(1)}%`;
+      document.getElementById('hrmcEnergy').textContent = `E/atom: ${(cost.E_per_atom||0).toFixed(3)} eV`;
+      document.getElementById('hrmcXce').textContent = `Ce: ${((cost.x_Ce||0)*100).toFixed(1)}%`;
+      btn.textContent = `⏳ STEP ${msg.step}/${msg.n_steps}`;
+
     } else if (msg.type === 'done') {
       const fc = msg.final_cost || {};
       if (overlay) setTimeout(() => { overlay.style.display = 'none'; }, 4000);
@@ -1212,7 +1303,9 @@ async function runHRMC() {
       btn.textContent = '⚡ REFINE AGAIN';
       hrmcRunning = false;
       addMsg('agent', 'ATOMINFER AGENT', '🤖',
-        `<strong>HRMC complete.</strong> Final R=${((fc.R_factor||0)*100).toFixed(1)}% · E/atom=${(fc.E_per_atom||0).toFixed(3)} eV · Ce=${((fc.x_Ce||0)*100).toFixed(1)}%`);
+        `<strong>HRMC complete.</strong> ${msg.n_steps} steps · Final R=${((fc.R_factor||0)*100).toFixed(1)}% · E/atom=${(fc.E_per_atom||0).toFixed(3)} eV · Ce=${((fc.x_Ce||0)*100).toFixed(1)}%`);
+    } else if (msg.type === 'error') {
+      addMsg('agent','ATOMINFER AGENT','🤖',`HRMC error: ${msg.message}`);
     }
   };
 
