@@ -527,177 +527,185 @@ async def hrmc_start(body: dict):
     loop = asyncio.get_running_loop()
 
     async def _run():
-        import concurrent.futures, sys
+        import sys
         sys.path.insert(0, str(Path(__file__).parent))
+        import numpy as np
+        from pymatgen.core import Structure, Lattice
+        from pymatgen.analysis.diffraction.xrd import XRDCalculator
+        from meam_calculator import MEAMCalculator
 
-        def _hrmc_thread():
-            import numpy as np
-            from pymatgen.core import Structure, Lattice
-            from pymatgen.analysis.diffraction.xrd import XRDCalculator
-            from meam_calculator import MEAMCalculator
+        cif_path  = body.get("cif_path", "./LiMn2O4.cif")
+        ce_pct    = float(body.get("ce_pct", 5.0))
+        n_steps   = int(body.get("n_steps", 100))
+        supercell = body.get("supercell", [1, 1, 1])
+        x_ce      = ce_pct / 100.0
 
-            cif_path  = body.get("cif_path", "./LiMn2O4.cif")
-            ce_pct    = float(body.get("ce_pct", 5.0))
-            n_steps   = int(body.get("n_steps", 100))
-            supercell = body.get("supercell", [1, 1, 1])
-            x_ce      = ce_pct / 100.0
+        # Configuration for smooth updates
+        XRD_INTERVAL   = 5    # recompute XRD pattern every N steps
+        TARGET_FPS     = 15   # target frames per second (67ms/frame)
+        FRAME_DELAY    = 1.0 / TARGET_FPS
 
-            # XRD is expensive (~200ms). Recompute every N steps; use cached R inbetween.
-            XRD_INTERVAL   = 5   # recompute XRD pattern every N steps
-            FRAME_INTERVAL = 5   # send full structure JSON every N steps
+        async def emit(data):
+            await q.put(data)
+            await asyncio.sleep(0.001)  # tiny yield to ensure flush
 
-            def emit(data):
-                asyncio.run_coroutine_threadsafe(q.put(data), loop)
+        try:
+            # ── STEP 1: Load Structure ──────────────────────────────────────
+            await emit({"type": "status", "message": "Loading structure from CIF..."})
+            
+            structure = await asyncio.to_thread(Structure.from_file, cif_path)
+            
+            if supercell != [1, 1, 1]:
+                await emit({"type": "status", "message": f"Building supercell {supercell}..."})
+                await asyncio.to_thread(structure.make_supercell, supercell)
 
-            try:
-                emit({"type": "status", "message": "Loading structure..."})
+            sp_list = [str(s.specie) for s in structure]
+            mn_idx  = [i for i, sp in enumerate(sp_list) if sp == "Mn"]
+            n_ce_init = max(1, int(x_ce * len(mn_idx))) if x_ce > 0 and mn_idx else 0
+            
+            if n_ce_init:
+                chosen = np.random.choice(mn_idx, n_ce_init, replace=False)
+                for idx in chosen:
+                    structure[int(idx)] = "Ce"
 
-                structure = Structure.from_file(cif_path)
-                if supercell != [1, 1, 1]:
-                    structure.make_supercell(supercell)
+            await emit({"type": "status",
+                  "message": f"Loaded {structure.formula} ({len(structure)} atoms)"})
 
-                sp_list = [str(s.specie) for s in structure]
-                mn_idx  = [i for i, sp in enumerate(sp_list) if sp == "Mn"]
-                n_ce_init = max(1, int(x_ce * len(mn_idx))) if x_ce > 0 and mn_idx else 0
-                if n_ce_init:
-                    chosen = np.random.choice(mn_idx, n_ce_init, replace=False)
-                    for idx in chosen:
-                        structure[int(idx)] = "Ce"
+            # ── STEP 2: Initialize MEAM Calculator ──────────────────────────
+            await emit({"type": "status", "message": "Initializing MEAM calculator..."})
+            meam = MEAMCalculator(rcut=4.8)
 
-                emit({"type": "status",
-                      "message": f"Loaded {structure.formula} ({len(structure)} atoms)"})
+            # ── STEP 3: Build synthetic target XRD ──────────────────────────
+            await emit({"type": "status", "message": "Building target XRD pattern..."})
+            
+            a_tgt = 8.248 + 0.04 * x_ce
+            lat_syn = Lattice.cubic(a_tgt)
+            li_s = [[0,0,0],[0,.5,.5],[.5,0,.5],[.5,.5,0],
+                    [.25,.25,.25],[.25,.75,.75],[.75,.25,.75],[.75,.75,.25]]
+            mn_s = [[.625,.625,.625],[.625,.875,.875],[.875,.625,.875],[.875,.875,.625],
+                    [.125,.125,.625],[.125,.375,.875],[.375,.125,.875],[.375,.375,.625],
+                    [.125,.625,.125],[.125,.875,.375],[.375,.625,.375],[.375,.875,.125],
+                    [.625,.125,.125],[.625,.375,.375],[.875,.125,.375],[.875,.375,.125]]
+            o_s  = [[.386,.386,.386],[.386,.614,.614],[.614,.386,.614],[.614,.614,.386],
+                    [.136,.136,.136],[.136,.364,.364],[.364,.136,.364],[.364,.364,.136]]
+            n_ce_syn = max(1, round(x_ce * len(mn_s))) if x_ce > 0 else 0
+            sp_syn   = (["Li"]*len(li_s) + ["Ce"]*n_ce_syn +
+                        ["Mn"]*(len(mn_s)-n_ce_syn) + ["O"]*len(o_s))
+            syn_struct  = Structure(lat_syn, sp_syn, li_s + mn_s + o_s)
+            
+            xrd_calc    = XRDCalculator(wavelength="CuKa")
+            patt_syn    = await asyncio.to_thread(xrd_calc.get_pattern, syn_struct, two_theta_range=(10, 80))
+            grid        = np.linspace(10, 80, 300)
+            I_exp       = np.interp(grid, patt_syn.x, patt_syn.y, left=0, right=0)
+            I_exp_norm  = (100 * I_exp / (I_exp.max() + 1e-10)).tolist()
+            grid_list   = grid.tolist()
 
-                # ── Build synthetic target XRD via Vegard's law ────────────────
-                a_tgt = 8.248 + 0.04 * x_ce
-                lat_syn = Lattice.cubic(a_tgt)
-                li_s = [[0,0,0],[0,.5,.5],[.5,0,.5],[.5,.5,0],
-                        [.25,.25,.25],[.25,.75,.75],[.75,.25,.75],[.75,.75,.25]]
-                mn_s = [[.625,.625,.625],[.625,.875,.875],[.875,.625,.875],[.875,.875,.625],
-                        [.125,.125,.625],[.125,.375,.875],[.375,.125,.875],[.375,.375,.625],
-                        [.125,.625,.125],[.125,.875,.375],[.375,.625,.375],[.375,.875,.125],
-                        [.625,.125,.125],[.625,.375,.375],[.875,.125,.375],[.875,.375,.125]]
-                o_s  = [[.386,.386,.386],[.386,.614,.614],[.614,.386,.614],[.614,.614,.386],
-                        [.136,.136,.136],[.136,.364,.364],[.364,.136,.364],[.364,.364,.136]]
-                n_ce_syn = max(1, round(x_ce * len(mn_s))) if x_ce > 0 else 0
-                sp_syn   = (["Li"]*len(li_s) + ["Ce"]*n_ce_syn +
-                            ["Mn"]*(len(mn_s)-n_ce_syn) + ["O"]*len(o_s))
-                syn_struct  = Structure(lat_syn, sp_syn, li_s + mn_s + o_s)
-                xrd_calc    = XRDCalculator(wavelength="CuKa")
-                patt_syn    = xrd_calc.get_pattern(syn_struct, two_theta_range=(10, 80))
-                grid        = np.linspace(10, 80, 300)
-                I_exp       = np.interp(grid, patt_syn.x, patt_syn.y, left=0, right=0)
-                I_exp_norm  = (100 * I_exp / (I_exp.max() + 1e-10)).tolist()
-                grid_list   = grid.tolist()
+            # ── Helpers (run in thread to not block) ────────────────────────
+            def calc_xrd(s):
+                """Return (R_factor, sim_y_list) using shared grid."""
+                p     = xrd_calc.get_pattern(s, two_theta_range=(10, 80))
+                I_sim = np.interp(grid, p.x, p.y, left=0, right=0)
+                sim_n = 100 * I_sim / (I_sim.max() + 1e-10)
+                exp_n = 100 * I_exp / (I_exp.max() + 1e-10)
+                R     = float(np.sum(np.abs(exp_n - sim_n)) /
+                              (np.sum(np.abs(exp_n)) + 1e-10))
+                return R, sim_n.tolist()
 
-                meam = MEAMCalculator(rcut=4.8)
+            def calc_meam_cost(s, R_cached):
+                """Cost using R-factor + Ce constraint. MEAM is computed for display only."""
+                E   = meam.compute_energy(s) / len(s)
+                sp_ = [str(st.specie) for st in s]
+                nCe = sp_.count("Ce"); nMn = sp_.count("Mn")
+                xc  = nCe / (nCe + nMn) if (nCe + nMn) > 0 else 0
+                # Use only R-factor + Ce constraint for MC acceptance
+                # (MEAM potential not calibrated for Li-Mn-O, so E is display-only)
+                F   = 1.0*R_cached + 5.0*(xc - x_ce)**2
+                return {"F": F, "R_factor": R_cached, "E_per_atom": E, "x_Ce": xc}
 
-                # ── Helpers ────────────────────────────────────────────────────
-                def calc_xrd(s):
-                    """Return (R_factor, sim_y_list) using shared grid."""
-                    p     = xrd_calc.get_pattern(s, two_theta_range=(10, 80))
-                    I_sim = np.interp(grid, p.x, p.y, left=0, right=0)
-                    sim_n = 100 * I_sim / (I_sim.max() + 1e-10)
-                    exp_n = 100 * I_exp / (I_exp.max() + 1e-10)
-                    R     = float(np.sum(np.abs(exp_n - sim_n)) /
-                                  (np.sum(np.abs(exp_n)) + 1e-10))
-                    return R, sim_n.tolist()
+            def metropolis(dF, T):
+                return dF <= 0 or np.random.random() < np.exp(-dF / max(T, 1e-9))
 
-                def calc_meam_cost(s, R_cached):
-                    """Fast cost using cached R — only MEAM energy is recomputed."""
-                    E   = meam.compute_energy(s) / len(s)
-                    sp_ = [str(st.specie) for st in s]
+            # ── STEP 4: Compute Initial State ───────────────────────────────
+            await emit({"type": "status", "message": "Computing initial XRD and energy..."})
+            
+            current       = structure.copy()
+            R_cur, sim_y  = await asyncio.to_thread(calc_xrd, current)
+            cost          = await asyncio.to_thread(calc_meam_cost, current, R_cur)
+
+            await emit({"type": "frame", "step": 0,
+                  "cost": cost,
+                  "structure": structure_to_viewer_json(current),
+                  "pattern": {"x": grid_list, "sim_y": sim_y, "exp_y": I_exp_norm},
+                  "n_steps": n_steps})
+
+            # ── STEP 5: MC Loop ─────────────────────────────────────────────
+            await emit({"type": "status", "message": f"Starting MC loop ({n_steps} steps)..."})
+            
+            T_start, T_end = 0.1, 0.01
+            last_emit_time = asyncio.get_event_loop().time()
+            
+            for step in range(n_steps):
+                T    = T_start + (T_end - T_start) * step / max(n_steps - 1, 1)
+                roll = np.random.random()
+                trial = None
+
+                # Displacement move (70%): move a random non-Li atom
+                if roll < 0.7:
+                    sp_ = [str(st.specie) for st in current]
+                    cands = [i for i, sp in enumerate(sp_) if sp != "Li"]
+                    if cands:
+                        trial = current.copy()
+                        idx   = int(np.random.choice(cands))
+                        disp  = np.random.uniform(-0.5, 0.5, 3)  # 0.5Å — visible in viewer
+                        trial.translate_sites([idx], disp, frac_coords=False)
+                # Swap move (30%): Ce<->Mn substitution
+                else:
+                    sp_ = [str(st.specie) for st in current]
                     nCe = sp_.count("Ce"); nMn = sp_.count("Mn")
-                    xc  = nCe / (nCe + nMn) if (nCe + nMn) > 0 else 0
-                    F   = 1.0*R_cached + 0.001*E + 5.0*(xc - x_ce)**2
-                    return {"F": F, "R_factor": R_cached, "E_per_atom": E, "x_Ce": xc}
+                    x_cur = nCe / (nCe + nMn) if (nCe + nMn) > 0 else 0
+                    trial = current.copy()
+                    if x_cur < x_ce:
+                        mn_cands = [i for i, sp in enumerate(sp_) if sp == "Mn"]
+                        if mn_cands:
+                            trial[int(np.random.choice(mn_cands))] = "Ce"
+                        else:
+                            trial = None
+                    else:
+                        ce_cands = [i for i, sp in enumerate(sp_) if sp == "Ce"]
+                        if ce_cands:
+                            trial[int(np.random.choice(ce_cands))] = "Mn"
+                        else:
+                            trial = None
 
-                def metropolis(dF, T):
-                    return dF <= 0 or np.random.random() < np.exp(-dF / max(T, 1e-9))
+                # Evaluate and accept/reject
+                if trial is not None:
+                    trial_cost = await asyncio.to_thread(calc_meam_cost, trial, R_cur)
+                    if metropolis(trial_cost["F"] - cost["F"], T):
+                        current = trial
+                        cost    = trial_cost
 
-                # ── Initialise ─────────────────────────────────────────────────
-                emit({"type": "status", "message": "Computing initial XRD..."})
-                current       = structure.copy()
-                R_cur, sim_y  = calc_xrd(current)
-                cost          = calc_meam_cost(current, R_cur)
+                # Refresh XRD every XRD_INTERVAL steps
+                if (step + 1) % XRD_INTERVAL == 0:
+                    R_cur, sim_y = await asyncio.to_thread(calc_xrd, current)
+                    cost = await asyncio.to_thread(calc_meam_cost, current, R_cur)
 
-                emit({"type": "frame", "step": 0,
+                # Emit frame every step with a small sleep so browser can render
+                include_pattern = ((step + 1) % XRD_INTERVAL == 0 or step == n_steps - 1)
+                await emit({"type": "frame", "step": step + 1,
                       "cost": cost,
                       "structure": structure_to_viewer_json(current),
-                      "pattern": {"x": grid_list, "sim_y": sim_y, "exp_y": I_exp_norm},
+                      "pattern": ({"x": grid_list, "sim_y": sim_y, "exp_y": I_exp_norm}
+                                  if include_pattern else None),
                       "n_steps": n_steps})
+                await asyncio.sleep(0.04)  # 40ms/step → ~25fps max, browser can render each frame
 
-                # ── MC loop ────────────────────────────────────────────────────
-                T_start, T_end = 0.1, 0.01
-                for step in range(n_steps):
-                    T    = T_start + (T_end - T_start) * step / max(n_steps - 1, 1)
-                    roll = np.random.random()
-                    trial = None
+            await emit({"type": "done", "n_steps": n_steps, "final_cost": cost})
 
-                    if roll < 0.7:
-                        sp_ = [str(st.specie) for st in current]
-                        cands = [i for i, sp in enumerate(sp_) if sp != "Li"]
-                        if cands:
-                            trial = current.copy()
-                            idx   = int(np.random.choice(cands))
-                            disp  = np.random.uniform(-0.2, 0.2, 3)
-                            trial.translate_sites([idx], disp, frac_coords=False)
-                            if trial.get_neighbors(trial[idx], r=1.2):
-                                trial = None
-                    else:
-                        sp_ = [str(st.specie) for st in current]
-                        nCe = sp_.count("Ce"); nMn = sp_.count("Mn")
-                        x_cur = nCe / (nCe + nMn) if (nCe + nMn) > 0 else 0
-                        trial = current.copy()
-                        if x_cur < x_ce:
-                            mn_cands = [i for i, sp in enumerate(sp_) if sp == "Mn"]
-                            if mn_cands:
-                                trial[int(np.random.choice(mn_cands))] = "Ce"
-                            else:
-                                trial = None
-                        else:
-                            ce_cands = [i for i, sp in enumerate(sp_) if sp == "Ce"]
-                            if ce_cands:
-                                trial[int(np.random.choice(ce_cands))] = "Mn"
-                            else:
-                                trial = None
-
-                    if trial is not None:
-                        # Fast trial: only MEAM, reuse cached R
-                        trial_cost = calc_meam_cost(trial, R_cur)
-                        if metropolis(trial_cost["F"] - cost["F"], T):
-                            current = trial
-                            cost    = trial_cost
-
-                    # Refresh XRD every XRD_INTERVAL steps
-                    if (step + 1) % XRD_INTERVAL == 0:
-                        R_cur, sim_y = calc_xrd(current)
-                        cost = calc_meam_cost(current, R_cur)
-
-                    # Emit full frame with structure+pattern every FRAME_INTERVAL steps
-                    include_full = ((step + 1) % FRAME_INTERVAL == 0
-                                    or step == n_steps - 1)
-                    if include_full:
-                        emit({"type": "frame", "step": step + 1,
-                              "cost": cost,
-                              "structure": structure_to_viewer_json(current),
-                              "pattern": {"x": grid_list, "sim_y": sim_y,
-                                          "exp_y": I_exp_norm},
-                              "n_steps": n_steps})
-                    else:
-                        # Lightweight progress (no structure JSON, saves bandwidth)
-                        emit({"type": "progress", "step": step + 1,
-                              "cost": cost, "n_steps": n_steps})
-
-                emit({"type": "done", "n_steps": n_steps, "final_cost": cost})
-
-            except Exception as exc:
-                import traceback as tb
-                emit({"type": "error", "message": str(exc),
-                      "traceback": tb.format_exc()[:800]})
-                emit({"type": "done"})
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            await loop.run_in_executor(pool, _hrmc_thread)
+        except Exception as exc:
+            import traceback as tb
+            await emit({"type": "error", "message": str(exc),
+                  "traceback": tb.format_exc()[:800]})
+            await emit({"type": "done"})
 
     asyncio.create_task(_run())
     return {"run_id": run_id}

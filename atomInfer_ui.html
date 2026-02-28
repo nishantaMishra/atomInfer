@@ -54,6 +54,7 @@ header{position:relative;z-index:10;border-bottom:1px solid var(--border);paddin
 .section-label{font-family:'Space Mono',monospace;font-size:11px;color:#ffffff;text-transform:uppercase;letter-spacing:1px;margin-bottom:10px;}
 .upload-zone{border:1.5px dashed var(--border2);border-radius:8px;padding:20px 16px;text-align:center;cursor:pointer;transition:all 0.2s;background:rgba(61,126,255,0.02);position:relative;}
 .upload-zone.has-file{border-color:var(--accent2);background:var(--glow2);border-style:solid;}
+.upload-zone.drag-over{border-color:var(--accent);background:rgba(61,126,255,0.12);border-style:solid;box-shadow:0 0 18px var(--glow);transform:scale(1.01);}
 .upload-icon{font-size:26.4px;margin-bottom:8px;display:block;}
 .upload-label{font-family:'Space Mono',monospace;font-size:12.1px;color:var(--text-dim);line-height:1.6;}
 .upload-label strong{color:var(--text);}
@@ -176,7 +177,7 @@ canvas.mini-chart{width:100%;height:100%;display:block;}
   </div>
   <div class="header-meta">
     <span><span class="status-dot"></span>AGENT READY</span>
-    <span>v2.0 · Penn State CHE</span>
+    <span>v2.0 ·  Penn State </span>
   </div>
 </header>
 
@@ -189,14 +190,15 @@ canvas.mini-chart{width:100%;height:100%;display:block;}
     </div>
     <div class="section">
       <div class="section-label">Input File</div>
-      <div class="upload-zone has-file">
-        <span class="upload-icon">📊</span>
-        <div class="upload-label">
-          <strong>XRD_Data_-_Nikhil.xlsx</strong><br>
-          Rigaku · Cu Kα · 4 sheets<br>
-          <span style="color:var(--accent2);">✓ loaded</span>
+      <div class="upload-zone" id="uploadZone" onclick="document.getElementById('xrdFileInput').click()">
+        <span class="upload-icon" id="uploadIcon">📂</span>
+        <div class="upload-label" id="uploadLabel">
+          <strong>Drop file here or click to browse</strong><br>
+          <span style="color:var(--text-dim);">Accepts .xlsx · .xls · .csv · .txt</span>
         </div>
+        <input type="file" id="xrdFileInput" accept=".xlsx,.xls,.csv,.txt" style="display:none;" onchange="handleFileSelect(this.files[0])">
       </div>
+      <div id="uploadProgress" style="display:none;margin-top:6px;font-family:'Space Mono',monospace;font-size:11px;color:var(--text-dim);">Uploading…</div>
     </div>
     <div class="section">
       <div class="section-label">Additional Techniques</div>
@@ -363,7 +365,7 @@ canvas.mini-chart{width:100%;height:100%;display:block;}
         <div class="section-label">XRD Pattern Match</div>
         <div class="chart-canvas-wrap"><canvas id="xrdChart" class="mini-chart"></canvas></div>
         <div style="display:flex;gap:12px;margin-top:6px;font-family:'Space Mono',monospace;font-size:9.9px;color:var(--text-dim);">
-          <span><span style="color:var(--accent);">──</span> Simulated</span>
+          <span><span style="color:var(--accent);">──</span> Predicted</span>
           <span><span style="color:var(--warn);">──</span> Experimental</span>
         </div>
       </div>
@@ -409,6 +411,55 @@ const SAMPLE_DATA={
 const STEP_LABELS=['Parse XRD file','Assign hkl peaks','Nelson-Riley extraction','Scherrer size','Query Materials Project','Build supercell','Substitute Ce','Validate R-factor'];
 let currentSample={name:'1% Ce-doped',ce:1.0};
 let running=false;
+let uploadedFilePath=null;   // server path returned by /api/upload
+let uploadedFileName=null;   // display name
+
+// ── File upload / drag-and-drop ──────────────────────────────────────────────
+function _setUploadedFile(name, serverPath){
+  uploadedFileName = name;
+  uploadedFilePath = serverPath;
+  const zone  = document.getElementById('uploadZone');
+  const icon  = document.getElementById('uploadIcon');
+  const label = document.getElementById('uploadLabel');
+  if(zone)  { zone.classList.add('has-file'); zone.classList.remove('drag-over'); }
+  if(icon)  icon.textContent = '📊';
+  if(label) label.innerHTML = `<strong>${name}</strong><br><span style="color:var(--accent2);">✓ ready</span>`;
+  const prog = document.getElementById('uploadProgress');
+  if(prog) prog.style.display='none';
+}
+
+async function handleFileSelect(file){
+  if(!file) return;
+  const prog = document.getElementById('uploadProgress');
+  const zone = document.getElementById('uploadZone');
+  if(prog){ prog.textContent='Uploading…'; prog.style.display='block'; }
+  try{
+    const fd = new FormData();
+    fd.append('file', file);
+    const r = await fetch('/api/upload', {method:'POST', body:fd});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const data = await r.json();
+    _setUploadedFile(file.name, data.path);
+  }catch(e){
+    if(prog){ prog.textContent='Upload failed: '+e.message; prog.style.display='block'; }
+    if(zone) zone.classList.remove('drag-over');
+  }
+}
+
+(function initDragDrop(){
+  const zone = document.getElementById('uploadZone');
+  if(!zone) return;
+  zone.addEventListener('dragenter', e=>{ e.preventDefault(); e.stopPropagation(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragover',  e=>{ e.preventDefault(); e.stopPropagation(); e.dataTransfer.dropEffect='copy'; zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', e=>{ e.preventDefault(); e.stopPropagation();
+    if(!zone.contains(e.relatedTarget)) zone.classList.remove('drag-over'); });
+  zone.addEventListener('drop', e=>{
+    e.preventDefault(); e.stopPropagation();
+    zone.classList.remove('drag-over');
+    const file = e.dataTransfer.files?.[0];
+    if(file) handleFileSelect(file);
+  });
+})();
 
 function toggleTech(btn,tech){if(tech==='xrd')return;btn.classList.toggle('active');}
 function selectSample(el,name,ce){document.querySelectorAll('.sample-item').forEach(s=>s.classList.remove('active'));el.classList.add('active');currentSample={name,ce};}
@@ -831,6 +882,7 @@ class CrystalViewer {
     const pts=[]; for(const [i,j] of edges){pts.push(corners[i]);pts.push(corners[j]);}
     const cg=new THREE.BufferGeometry().setFromPoints(pts);
     this.scene.add(new THREE.LineSegments(cg,new THREE.LineBasicMaterial({color:0x3d7eff,opacity:0.75,transparent:true})));
+    this._atoms=[];
     const geomCache={};
     const elemSet=new Set();
     for(const site of data.sites){
@@ -841,7 +893,9 @@ class CrystalViewer {
       if(!geomCache[elem]) geomCache[elem]=new THREE.SphereGeometry(radius,20,20);
       const mesh=new THREE.Mesh(geomCache[elem], new THREE.MeshPhongMaterial({color,shininess:80,specular:new THREE.Color(0.3,0.3,0.3)}));
       const [x,y,z]=site.xyz; mesh.position.set(x,y,z);
+      mesh.userData.elem=elem;
       this.scene.add(mesh);
+      this._atoms.push(mesh);
     }
     if(this._showBonds) this._addBonds(data.sites);
     const center=va.clone().add(vb).add(vc).multiplyScalar(0.5);
@@ -881,12 +935,34 @@ class CrystalViewer {
     this.controls.update();
   }
   // Rebuild scene but keep camera exactly where it is
+  // Fast trajectory update — just moves existing meshes in-place, no geometry rebuild, no camera reset
   loadSites(data){
-    // Save camera before clear()
-    const camPos = this.camera.position.clone();
-    const tgt    = this.controls.target.clone();
+    const elemSet=new Set();
+    // FAST PATH: atom count unchanged — update positions & colours only
+    if(this._atoms && this._atoms.length===data.sites.length){
+      for(let i=0;i<data.sites.length;i++){
+        const site=data.sites[i];
+        const elem=site.species?.[0]?.element||'X';
+        elemSet.add(elem);
+        const mesh=this._atoms[i];
+        const[x,y,z]=site.xyz;
+        mesh.position.set(x,y,z);
+        if(mesh.userData.elem!==elem){
+          // Element changed (Ce<->Mn swap) — update colour and swap geometry
+          const color=CPK_COLORS[elem]||CPK_COLORS.DEFAULT;
+          const radius=(COVALENT_RADII[elem]||COVALENT_RADII.DEFAULT)*0.4;
+          mesh.material.color.setHex(color);
+          mesh.geometry=new THREE.SphereGeometry(radius,14,14);
+          mesh.userData.elem=elem;
+        }
+      }
+      return[...elemSet];
+    }
+    // SLOW PATH (first call or atom count changed) — full rebuild, restore camera
+    const camPos=this.camera.position.clone();
+    const tgt=this.controls.target.clone();
     this.clear();
-    // Rebuild lattice box
+    this._atoms=[];
     const mat=data.lattice.matrix;
     const va=new THREE.Vector3(mat[0][0],mat[0][1],mat[0][2]);
     const vb=new THREE.Vector3(mat[1][0],mat[1][1],mat[1][2]);
@@ -900,20 +976,19 @@ class CrystalViewer {
     this.scene.add(new THREE.LineSegments(
       new THREE.BufferGeometry().setFromPoints(pts),
       new THREE.LineBasicMaterial({color:0x3d7eff,opacity:0.75,transparent:true})));
-    // Add atoms — fresh geometry per mesh to avoid shared-dispose bug
-    const elemSet=new Set();
+    const geomCache={};
     for(const site of data.sites){
       const elem=site.species?.[0]?.element||'X';
       elemSet.add(elem);
-      const color=(CPK_COLORS[elem]||CPK_COLORS.DEFAULT);
+      const color=CPK_COLORS[elem]||CPK_COLORS.DEFAULT;
       const radius=(COVALENT_RADII[elem]||COVALENT_RADII.DEFAULT)*0.4;
-      const mesh=new THREE.Mesh(
-        new THREE.SphereGeometry(radius,14,14),
-        new THREE.MeshPhongMaterial({color,shininess:80}));
+      if(!geomCache[elem]) geomCache[elem]=new THREE.SphereGeometry(radius,14,14);
+      const mesh=new THREE.Mesh(geomCache[elem],new THREE.MeshPhongMaterial({color,shininess:80}));
       const[x,y,z]=site.xyz; mesh.position.set(x,y,z);
+      mesh.userData.elem=elem;
       this.scene.add(mesh);
+      this._atoms.push(mesh);
     }
-    // Restore camera — no jump
     this.camera.position.copy(camPos);
     this.controls.target.copy(tgt);
     this.controls.update();
@@ -1062,6 +1137,8 @@ async function startAnalysis(){
   document.getElementById('runBtn').disabled=true;
   document.getElementById('logContainer').innerHTML='';
   const sN=currentSample.name;
+  const fileName = uploadedFileName || 'XRD_Data_-_Nikhil.xlsx';
+  const filePath = uploadedFilePath || './XRD_Data_-_Nikhil.xlsx';
   let data=SAMPLE_DATA[sN];
   if(!data){
     const base=SAMPLE_DATA['LMO']||SAMPLE_DATA['1% Ce-doped'];
@@ -1072,12 +1149,12 @@ async function startAnalysis(){
     data.n_mn = base.n_mn - data.n_ce;
   }
 
-  await addMsg('user','USER REQUEST','👤',`Analyze XRD file <strong>XRD_Data_-_Nikhil.xlsx</strong>, sheet "<strong>${sN}</strong>". Identify phase, extract lattice parameter and crystallite size, query Materials Project, build Ce-doped atomistic model, validate with R-factor.`);
+  await addMsg('user','USER REQUEST','👤',`Analyze XRD file <strong>${fileName}</strong>, sheet "<strong>${sN}</strong>". Identify phase, extract lattice parameter and crystallite size, query Materials Project, build Ce-doped atomistic model, validate with R-factor.`);
   await sleep(600);
 
   advanceStep(0);addTyping();await sleep(1200);removeTyping();
   await addMsg('agent','ATOMINFER AGENT','🤖',`I'll begin by parsing the XRD file. The sheet "${sN}" should contain Rigaku-format data with columns: Angle, I(o), I(b). Net intensity = I(o) − I(b). Expecting ~1600 data points between 5–70° 2θ for Cu Kα (λ = 1.54059 Å).`);
-  await addToolCall('parse_xrd_file',`filepath = "XRD_Data_-_Nikhil.xlsx"\nsheet_name = "${sN}"`,300);
+  await addToolCall('parse_xrd_file',`filepath = "${fileName}"\nsheet_name = "${sN}"`,300);
   await sleep(800);
   await addToolResult(`<div class="kv-grid"><span class="kv-key">status</span><span class="kv-val highlight">success</span><span class="kv-key">n_points</span><span class="kv-val">1,622</span><span class="kv-key">range</span><span class="kv-val">5.00 – 69.97°</span><span class="kv-key">wavelength</span><span class="kv-val">1.54059 Å (Cu Kα)</span><span class="kv-key">instrument</span><span class="kv-val">Rigaku · 45kV/40mA</span></div>`,200);
 
@@ -1225,53 +1302,8 @@ async function runHRMC() {
     return;
   }
 
-  // ── HARDCODED FRAME SLIDESHOW ───────────────────────────────────────────────
-  btn.textContent = '⏳ GENERATING FRAMES...';
-  addMsg('agent','ATOMINFER AGENT','🤖',
-    `Running HRMC trajectory — Ce ${ce_pct}%, generating ${Math.round(n_steps/20)+4} frames…`);
-  try {
-    const fr = await fetch('/api/hrmc/frames', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({cif_path:'./LiMn2O4.cif', ce_pct,
-                            n_frames: Math.min(Math.round(n_steps/20)+4, 8)})
-    });
-    const {frames, error} = await fr.json();
-    if(error) throw new Error(error);
-    // Show slideshow overlay
-    const slideshow = document.getElementById('hrmcSlideshow');
-    const frameImg  = document.getElementById('hrmcFrameImg');
-    const frameLbl  = document.getElementById('hrmcFrameLabel');
-    slideshow.style.display = 'flex';
-    let fi = 0;
-    // Pre-load all frames then animate
-    const loaded = await Promise.all(frames.map(src => new Promise(res=>{
-      const img = new Image(); img.onload=()=>res(src); img.onerror=()=>res(src);
-      img.src = src+'?t='+Date.now();
-    })));
-    frameImg.src = loaded[0]+'?t='+Date.now();
-    frameLbl.textContent = `Frame 1 / ${loaded.length}`;
-    btn.textContent = `⏳ FRAME 1/${loaded.length}`;
-    const iv = setInterval(()=>{
-      fi++;
-      if(fi >= loaded.length){
-        clearInterval(iv);
-        setTimeout(()=>{ slideshow.style.display='none'; },1500);
-        btn.disabled = false;
-        btn.textContent = '⚡ REFINE AGAIN';
-        hrmcRunning = false;
-        addMsg('agent','ATOMINFER AGENT','🤖',
-          `<strong>HRMC trajectory complete.</strong> Ce ${ce_pct}% — structure evolved over ${loaded.length} frames. Atoms shuffled, Ce substituted at Mn 16d sites.`);
-        return;
-      }
-      frameImg.src = loaded[fi]+'?t='+Date.now();
-      frameLbl.textContent = `Frame ${fi+1} / ${loaded.length}`;
-      btn.textContent = `⏳ FRAME ${fi+1}/${loaded.length}`;
-    }, 1100);
-    return; // done — skip WebSocket path below
-  } catch(e) {
-    addMsg('agent','ATOMINFER AGENT','🤖',`Frame gen error: ${e.message} — falling back to live stream`);
-  }
-  // ── END SLIDESHOW — fall through to WebSocket live stream if frames fail ───
+  // Show results panel so gauge is visible during HRMC
+  showResultsPanel();
 
   btn.textContent = '⏳ STARTING HRMC...';
   addMsg('agent', 'ATOMINFER AGENT', '🤖',
@@ -1337,6 +1369,29 @@ async function runHRMC() {
       document.getElementById('hrmcEnergy').textContent = `E/atom: ${(cost.E_per_atom||0).toFixed(3)} eV`;
       document.getElementById('hrmcXce').textContent = `Ce: ${((cost.x_Ce||0)*100).toFixed(1)}%`;
       if (cost.R_factor != null) updateRFactor(cost.R_factor);
+      // Update right panel Ce% and R-factor from real HRMC data
+      if (cost.x_Ce != null) {
+        document.getElementById('rCe').innerHTML = `${((cost.x_Ce||0)*100).toFixed(1)}<span class="metric-unit">%</span>`;
+      }
+      // Update composition bar from real site counts
+      if (msg.structure && msg.structure.sites) {
+        const sites = msg.structure.sites;
+        const nLi = sites.filter(s => (s.species||[])[0]?.element === 'Li').length;
+        const nMn = sites.filter(s => (s.species||[])[0]?.element === 'Mn').length;
+        const nCe = sites.filter(s => (s.species||[])[0]?.element === 'Ce').length;
+        const nO  = sites.filter(s => (s.species||[])[0]?.element === 'O').length;
+        const tot = sites.length;
+        if (tot > 0) {
+          document.getElementById('compLi').style.width = (nLi/tot*100).toFixed(0)+'%';
+          document.getElementById('compMn').style.width = (nMn/tot*100).toFixed(0)+'%';
+          document.getElementById('compCe').style.width = Math.max(nCe/tot*100, 0.5).toFixed(1)+'%';
+          document.getElementById('compO').style.width  = (nO/tot*100).toFixed(0)+'%';
+          document.getElementById('legLi').textContent = `Li: ${nLi}`;
+          document.getElementById('legMn').textContent = `Mn: ${nMn}`;
+          document.getElementById('legCe').textContent = `Ce: ${nCe}`;
+          document.getElementById('legO').textContent  = `O: ${nO}`;
+        }
+      }
       btn.textContent = `⏳ STEP ${msg.step}/${msg.n_steps}`;
 
     } else if (msg.type === 'progress') {
