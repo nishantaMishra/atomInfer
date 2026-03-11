@@ -84,5 +84,3 @@ Refer to `backend_server.py` for exact message shapes for streaming events (stat
 ## Contributing
 Contributions, bug reports and feature requests are welcome. Open issues or submit PRs.
 
-## License
-Add a license as appropriate for your project.
