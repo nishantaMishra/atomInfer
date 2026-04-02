@@ -1,0 +1,258 @@
+# ═══════════════════════════════════════════════════════════════════════════════
+# AtomInfer Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Copy this file to config.toml and edit to match your setup.
+# Values here are sensible defaults; override only what you need.
+#
+#   cp config.default.toml config.toml
+#
+# Environment variables (.env or shell exports) override the [api_keys] section.
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Server ───────────────────────────────────────────────────────────────────
+[server]
+host = "0.0.0.0"
+port = 8000
+open_browser = true          # auto-open UI in default browser on startup
+
+# ─── Directories ──────────────────────────────────────────────────────────────
+[directories]
+output  = "./atomInfer_output"
+uploads = "./uploads"
+models  = "./models"         # local LLM model files (Ollama, GGUF, etc.)
+
+# ─── API Keys ────────────────────────────────────────────────────────────────
+# Prefer setting these as environment variables or in .env for security.
+# These are fallback values only; env vars always take precedence.
+[api_keys]
+# groq_api_key = ""
+# openai_api_key = ""
+# anthropic_api_key = ""
+# mp_api_key = ""
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LLM Configuration
+# ═══════════════════════════════════════════════════════════════════════════════
+# Define named model profiles, then assign them to task types.
+# The system tries models in order and falls back to the next if unavailable.
+
+[llm]
+temperature  = 0.05          # global default (low = deterministic)
+max_tokens   = 4096          # global default
+max_iterations = 15          # max tool-call loops per agent run
+
+# ─── Model Profiles ──────────────────────────────────────────────────────────
+# Each [llm.models.<name>] block defines a model the system can use.
+# provider: "ollama" | "groq" | "openai" | "anthropic" | "vllm" | "lmstudio"
+
+[llm.models.local_llama]
+provider  = "ollama"
+model     = "llama3.3:70b"
+endpoint  = "http://localhost:11434"
+# No api_key needed for local Ollama
+
+[llm.models.local_qwen]
+provider  = "ollama"
+model     = "qwen2.5:14b"
+endpoint  = "http://localhost:11434"
+
+[llm.models.groq_llama]
+provider  = "groq"
+model     = "llama-3.3-70b-versatile"
+api_key_env = "GROQ_API_KEY"   # reads from this env var
+
+[llm.models.openai_gpt4]
+provider  = "openai"
+model     = "gpt-4o"
+api_key_env = "OPENAI_API_KEY"
+
+[llm.models.anthropic_claude]
+provider    = "anthropic"
+model       = "claude-sonnet-4-20250514"
+api_key_env = "ANTHROPIC_API_KEY"
+
+[llm.models.lmstudio]
+provider  = "lmstudio"
+model     = "local-model"
+endpoint  = "http://localhost:1234/v1"
+
+[llm.models.vllm]
+provider  = "vllm"
+model     = "meta-llama/Llama-3.3-70B-Instruct"
+endpoint  = "http://localhost:8080/v1"
+
+# ─── Task Assignments ────────────────────────────────────────────────────────
+# Each task type maps to a priority list of model profile names.
+# The system tries the first available model, then falls back in order.
+#
+# Task types:
+#   xrd_analysis       – XRD peak assignment, lattice parameter extraction
+#   raman_analysis     – Raman mode assignment, disorder analysis
+#   structure_building – Supercell construction, doping, validation
+#   general_reasoning  – Cross-technique analysis, interpretation, reporting
+#   peak_assignment    – Quick peak identification (can use smaller model)
+
+[llm.task_assignments]
+xrd_analysis       = ["local_llama", "groq_llama", "openai_gpt4", "local_qwen"]
+raman_analysis     = ["local_llama", "groq_llama", "openai_gpt4", "local_qwen"]
+structure_building = ["local_llama", "groq_llama", "openai_gpt4"]
+general_reasoning  = ["local_llama", "groq_llama", "openai_gpt4", "anthropic_claude"]
+peak_assignment    = ["local_qwen", "local_llama", "groq_llama"]
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Active Material Profile
+# ═══════════════════════════════════════════════════════════════════════════════
+# Select which material system is active. This determines XRD peak windows,
+# Raman mode assignments, doping rules, and the LLM system prompt.
+# Built-in profiles: "LiMn2O4"
+# Users can add custom profiles under materials/ directory.
+
+[materials]
+active = "LiMn2O4"
+
+# ─── LiMn2O4 Spinel ──────────────────────────────────────────────────────────
+[materials.LiMn2O4]
+formula            = "LiMn2O4"
+mp_id              = "mp-19017"
+space_group        = "Fd-3m"
+space_group_number = 227
+crystal_system     = "cubic"
+structure_type     = "spinel"
+reference_lattice_A = 8.2480     # ICDD PDF 35-0782
+
+[materials.LiMn2O4.wyckoff]
+# site_label = "element"
+"8a"  = "Li"
+"16d" = "Mn"
+"32e" = "O"
+
+[materials.LiMn2O4.doping]
+host_site      = "16d"           # dopant substitutes at this Wyckoff site
+host_element   = "Mn"            # element being replaced
+allowed_dopants = ["Ce"]
+max_fraction   = 0.10            # maximum dopant fraction
+seed           = 42              # random seed for reproducible substitutions
+
+[materials.LiMn2O4.doping.ionic_radii_A]
+"Ce3+" = 1.01
+"Ce4+" = 0.87
+"Mn3+" = 0.645
+"Mn4+" = 0.53
+"Li+"  = 0.76
+"O2-"  = 1.40
+
+[materials.LiMn2O4.doping.vegard]
+# Vegard's law: a = a_pristine + coefficient * Ce_fraction
+a_pristine_A = 8.2480
+coefficient  = 0.35              # Å per fraction Ce (calibrated from experimental data)
+min_fraction = 0.0
+max_fraction = 0.10
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# XRD Analysis Parameters
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[analysis.xrd]
+wavelength_A      = 1.54059      # Cu Kα
+scherrer_constant = 0.9          # K in Scherrer equation
+angular_range_deg = [10.0, 80.0] # useful 2θ range
+
+# R-factor quality thresholds
+[analysis.xrd.r_factor]
+excellent  = 0.10
+good       = 0.20
+acceptable = 0.30
+
+# hkl peak assignment windows for LiMn2O4 Fd-3m
+# Format: [min_2theta, max_2theta]
+[analysis.xrd.hkl_windows]
+"111" = [18.0, 20.5]
+"311" = [35.5, 37.5]
+"222" = [37.5, 38.5]
+"400" = [43.0, 45.5]
+"331" = [47.5, 49.0]
+"511" = [57.5, 59.5]
+"440" = [63.0, 65.5]
+"531" = [66.5, 68.0]
+
+# CeO2 secondary phase detection
+[analysis.xrd.secondary_phases.CeO2]
+peak_positions_deg = [28.55, 33.08, 47.48, 56.34]
+detection_threshold = 0.02       # fraction of max peak intensity
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Raman Analysis Parameters
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[analysis.raman]
+wavenumber_range_cm1 = [100.0, 1000.0]
+reference_A1g_cm1    = 628.0     # pristine LMO reference position
+
+# Mode assignment windows: [min_cm1, max_cm1]
+[analysis.raman.mode_windows]
+A1g_Mn4O = [610, 650]           # main peak ~625 cm⁻¹
+A1g_Mn3O = [560, 600]           # ~577 cm⁻¹
+F2g_2    = [465, 500]           # ~483 cm⁻¹
+Eg       = [420, 450]           # ~434 cm⁻¹
+CeO2     = [455, 475]           # ~465 cm⁻¹
+T2g_Li   = [150, 180]           # ~162 cm⁻¹
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# HRMC Refinement Parameters
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[analysis.hrmc]
+default_steps      = 100
+xrd_interval       = 5          # recompute XRD every N steps
+target_fps         = 15         # target frame rate for viewer updates
+
+[analysis.hrmc.temperature]
+start = 0.1
+end   = 0.01
+
+[analysis.hrmc.moves]
+max_displacement_A = 0.5        # maximum atom displacement per move
+displacement_weight = 0.7       # probability of displacement move
+swap_weight         = 0.3       # probability of Ce<->Mn swap move
+
+[analysis.hrmc.cost_weights]
+xrd       = 1.0                 # weight for R-factor in cost function
+ce_target = 5.0                 # weight for Ce composition constraint
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MEAM Potential Parameters
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[potentials.meam]
+cutoff_radius_A       = 4.8
+coulomb_screening_kappa = 10.0
+use_buckingham        = true
+use_coulomb           = true
+library_path          = "./potentials/library.meam"
+alloy_path            = "./potentials/library.meam_alloy"
+
+# Buckingham parameters for Ce-O
+[potentials.buckingham.Ce-O]
+A_eV     = 2141.4
+rho_A    = 0.3541
+C_eVA6   = 43.83
+
+[potentials.buckingham.O-O]
+A_eV     = 9547.96
+rho_A    = 0.2192
+C_eVA6   = 32.00
+
+# Formal charges for Coulomb / Qeq / Ewald
+[potentials.charges]
+Li = 1.0
+Mn = 3.5
+O  = -2.0
+Ce = 3.0
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Supercell Building Parameters
+# ═══════════════════════════════════════════════════════════════════════════════
+
+[structure]
+max_supercell_dim = 4           # cap supercell at NxNxN
+default_supercell = [2, 2, 2]   # used when crystallite size not available

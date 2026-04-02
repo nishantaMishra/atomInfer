@@ -2,9 +2,9 @@
 """
 AtomInfer v2 - Experimental Characterization → Atomistic Model Agent
 =====================================================================
-Architecture: Raw Groq tool-calling loop (no LangChain)
-LLM: llama-3.3-70b-versatile via Groq API
-Fallback: qwen2.5:14b via Ollama (localhost:11434)
+Architecture: Raw tool-calling loop with configurable LLM providers.
+Supports: Ollama (local), Groq, OpenAI, Anthropic, vLLM, LM Studio.
+Configuration: config.toml (see config.default.toml for reference).
 
 Tools:
   XRD   : parse_xrd_file, analyze_xrd_peaks
@@ -13,17 +13,14 @@ Tools:
   Model : query_materials_project, build_doped_supercell, compute_xrd_r_factor
 
 Usage:
-  export GROQ_API_KEY=your_key
-  export MP_API_KEY=your_key
-
-  # Single technique
-  python atomInfer_v2.py --xrd XRD_Data_-_Nikhil.xlsx --sheet "2% Ce-doped"
+  # Configure your models in config.toml, then:
+  python atomInfer_v2.py --xrd XRD_Data.xlsx --sheet "2% Ce-doped"
 
   # Multi-technique
   python atomInfer_v2.py --xrd data.xlsx --sheet "2% Ce" --raman raman.txt
 
   # Full demo (all sheets)
-  python atomInfer_v2.py --demo --xrd XRD_Data_-_Nikhil.xlsx
+  python atomInfer_v2.py --demo --xrd XRD_Data.xlsx
 """
 
 import os, json, argparse, sys
@@ -31,19 +28,19 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 
-# ── LLM client (Groq primary, Ollama fallback) ───────────────────────────────
-def get_llm_client(prefer_local=False):
-    if prefer_local or not os.environ.get("GROQ_API_KEY"):
-        from openai import OpenAI
-        client = OpenAI(base_url="http://localhost:11434/v1", api_key="ollama")
-        model  = "qwen2.5:14b"
-        print("[LLM] Using local Ollama: qwen2.5:14b")
-    else:
-        from groq import Groq
-        client = Groq(api_key=os.environ["GROQ_API_KEY"])
-        model  = "llama-3.3-70b-versatile"
-        print("[LLM] Using Groq: llama-3.3-70b-versatile")
-    return client, model
+# ── Configuration & model registry ───────────────────────────────────────────
+from config_loader import cfg
+from model_registry import registry
+
+def get_llm_client(task: str = "general_reasoning"):
+    """Get an LLM client for the given task type.
+
+    Uses model_registry to select the best available model based on
+    config.toml [llm.task_assignments] and model availability.
+    Returns (client, model_name) compatible with the agent loop.
+    """
+    llm_client, model_name = registry.get_client_for_task(task)
+    return llm_client, model_name
 
 # ── pymatgen ─────────────────────────────────────────────────────────────────
 from pymatgen.core import Structure, Lattice
@@ -51,84 +48,11 @@ from pymatgen.analysis.diffraction.xrd import XRDCalculator
 
 # =============================================================================
 # SYSTEM PROMPT
-# Encodes domain knowledge WITHOUT hardcoding any experimental values.
+# Generated dynamically from the active material profile in config.toml.
 # The agent must derive all numbers from the data via tools.
 # =============================================================================
 
-SYSTEM_PROMPT = """You are AtomInfer, an expert AI agent for computational materials science.
-Your mission: analyze experimental characterization data and produce atomistic models
-ready for molecular dynamics or DFT simulation.
-
-## DOMAIN KNOWLEDGE
-
-### Material system
-You are working with spinel LiMn2O4 (LMO) and its Ce-doped variants LiMn(2-x)CexO4.
-- Space group: Fd-3m (cubic spinel, #227)
-- Wyckoff positions: Li at 8a, Mn/Ce at 16d, O at 32e
-- Ce substitutes at the 16d Mn site only
-- Pristine LMO reference: a ≈ 8.24 Å (ICDD PDF 35-0782) — treat as literature reference only
-- Materials Project ID for LiMn2O4: mp-19017
-
-### Ce doping physics
-- Ce3+ (ionic radius 1.01 Å) is larger than Mn3+ (0.645 Å) and Mn4+ (0.53 Å)
-- Ce4+ (ionic radius 0.87 Å) is also possible — mixed valence Ce3+/Ce4+ is common
-- Ce doping suppresses Jahn-Teller distortion by reducing Mn3+ content
-- At low Ce (<1%), charge compensation may favor Ce4+ → lattice contraction possible
-- At higher Ce (>1%), Ce3+ dominates → lattice expansion expected
-- Non-monotonic lattice behavior with Ce concentration is physically meaningful
-
-### XRD analysis (Cu Kα, λ = 1.54059 Å)
-- Assign peaks using LiMn2O4 Fd-3m reflection rules: h,k,l all odd or all even
-- Key reflections: (111)~18.6°, (311)~36.1°, (222)~37.7°, (400)~43.9°,
-                   (331)~48.0°, (511)~58.1°, (440)~63.8°, (531)~67.1°
-- Extract lattice parameter via Nelson-Riley extrapolation (use multiple peaks)
-- Scherrer equation: D = Kλ / (β cosθ), K=0.9, β=FWHM in radians
-- Instrumental broadening: subtract in quadrature if instrument file available
-- CeO2 secondary phase peaks at: 28.5°, 33.1°, 47.5°, 56.3° — check for these
-
-### Raman spectroscopy (LiMn2O4 spinel)
-- A1g main (Mn4+-O stretch): ~625-628 cm⁻¹
-- A1g secondary (Mn3+-O stretch): ~577 cm⁻¹
-- F2g modes: ~483 cm⁻¹, ~354 cm⁻¹
-- Eg mode: ~434 cm⁻¹
-- T2g (Li sublattice): ~162 cm⁻¹
-- Ce doping: A1g red-shifts, FWHM broadens, 577/625 intensity ratio increases
-- CeO2 secondary phase: strong peak at ~465 cm⁻¹
-
-### AFM data
-- Grain size from AFM should be consistent with Scherrer crystallite size
-- AFM measures surface morphology; Scherrer measures coherent diffraction domains
-- RMS roughness Rq and average roughness Ra are standard outputs
-- Grain size from AFM ≥ Scherrer size (AFM grains = agglomerates of crystallites)
-
-### Structure building rules
-1. Always fetch base structure from Materials Project (mp-19017 for LiMn2O4)
-2. Scale lattice parameter to match your measured value — do not use MP lattice directly
-3. Ce substitution: randomly replace x fraction of Mn (16d) sites with Ce
-4. For Scherrer size D nm: build supercell with edge length ≈ D nm (a × n ≈ D×10 Å)
-5. Validate with XRD R-factor — R < 0.3 is acceptable for initial model
-
-## WORKFLOW
-
-You MUST follow this sequence. Do not skip steps.
-
-STEP 1 — Parse all provided input files using parse_* tools
-STEP 2 — Analyze each technique using analyze_* tools to extract parameters
-STEP 3 — Cross-check parameters across techniques (do lattice param and Raman agree on Ce%?)
-STEP 4 — Query Materials Project for base structure (always use mp-19017 for LiMn2O4)
-STEP 5 — Build doped supercell using measured lattice parameter and Ce fraction
-STEP 6 — Validate structure with XRD R-factor
-STEP 7 — Report: phase, space group, lattice parameter, Ce%, crystallite size,
-          output file paths, R-factor, and any secondary phases detected
-
-## REASONING STYLE
-- Think step by step. State what you expect before calling a tool.
-- After each tool result, interpret it in 1-2 sentences before proceeding.
-- If a tool returns an error, diagnose and try with corrected parameters.
-- Never hardcode lattice parameters or Ce fractions — always derive from data.
-- Be quantitatively precise. Report numbers with appropriate significant figures.
-- Flag any physically unusual results (non-monotonic trends, unexpected phases, etc.)
-  and explain them using the domain knowledge above."""
+SYSTEM_PROMPT = cfg.generate_system_prompt()
 
 
 # =============================================================================
@@ -182,7 +106,8 @@ def parse_xrd_file(filepath: str, sheet_name: str = None) -> dict:
             meta = f"Text file: {filepath}"
 
         # Filter to useful angular range
-        data = data[(data['two_theta'] >= 10) & (data['two_theta'] <= 80)]
+        ang_lo, ang_hi = cfg.xrd.angular_range_deg
+        data = data[(data['two_theta'] >= ang_lo) & (data['two_theta'] <= ang_hi)]
 
         return {
             "status": "success",
@@ -190,7 +115,7 @@ def parse_xrd_file(filepath: str, sheet_name: str = None) -> dict:
             "n_points": len(data),
             "two_theta_range": [round(float(data['two_theta'].min()), 2),
                                  round(float(data['two_theta'].max()), 2)],
-            "wavelength_A": 1.54059,
+            "wavelength_A": cfg.xrd.wavelength_A,
             "two_theta": data['two_theta'].tolist(),
             "intensity":  data['I_net'].tolist(),
             "metadata": meta[:120],
@@ -200,29 +125,21 @@ def parse_xrd_file(filepath: str, sheet_name: str = None) -> dict:
 
 
 def analyze_xrd_peaks(two_theta: list, intensity: list,
-                      wavelength_A: float = 1.54059) -> dict:
+                      wavelength_A: float = None) -> dict:
     """
-    Peak finding, hkl assignment for LiMn2O4 spinel, Nelson-Riley lattice
-    parameter extraction, Scherrer crystallite size from (111).
-    Also checks for CeO2 secondary phase peaks.
+    Peak finding, hkl assignment, Nelson-Riley lattice parameter extraction,
+    Scherrer crystallite size from first peak.
+    Also checks for secondary phase peaks.
+    All parameters driven by config.toml.
     """
     from scipy.signal import find_peaks
 
     tth = np.array(two_theta)
     I   = np.array(intensity)
-    lam = wavelength_A
+    lam = wavelength_A if wavelength_A is not None else cfg.xrd.wavelength_A
 
-    # Spinel Fd-3m reflection windows (2theta, hkl)
-    hkl_windows = {
-        (1,1,1): (18.0, 20.5),
-        (3,1,1): (35.5, 37.5),
-        (2,2,2): (37.5, 38.5),
-        (4,0,0): (43.0, 45.5),
-        (3,3,1): (47.5, 49.0),
-        (5,1,1): (57.5, 59.5),
-        (4,4,0): (63.0, 65.5),
-        (5,3,1): (66.5, 68.0),
-    }
+    # Reflection windows from config
+    hkl_windows = cfg.get_hkl_windows_tuples()
 
     nr_x, nr_a = [], []
     assigned_peaks = {}
@@ -271,37 +188,45 @@ def analyze_xrd_peaks(two_theta: list, intensity: list,
     else:
         return {"error": "No LiMn2O4 spinel peaks found in XRD data"}
 
-    # Scherrer from (111)
-    mask_111 = (tth >= 17.5) & (tth <= 21.0)
-    w_tth_111 = tth[mask_111]
-    w_I_111   = I[mask_111]
-    if len(w_I_111) > 5:
-        pk_111 = np.argmax(w_I_111)
-        tth_111 = w_tth_111[pk_111]
-        half_max = w_I_111[pk_111] / 2
-        above = w_tth_111[w_I_111 >= half_max]
+    # Scherrer from first hkl window (typically (111))
+    first_hkl = next(iter(hkl_windows), None)
+    if first_hkl:
+        flo, fhi = hkl_windows[first_hkl]
+        mask_first = (tth >= flo - 0.5) & (tth <= fhi + 0.5)
+    else:
+        mask_first = (tth >= 17.5) & (tth <= 21.0)
+    w_tth_first = tth[mask_first]
+    w_I_first   = I[mask_first]
+    K = cfg.xrd.scherrer_constant
+    if len(w_I_first) > 5:
+        pk_first = np.argmax(w_I_first)
+        tth_111 = w_tth_first[pk_first]
+        half_max = w_I_first[pk_first] / 2
+        above = w_tth_first[w_I_first >= half_max]
         fwhm_deg = float(above[-1]-above[0]) if len(above)>=2 else 0.15
         fwhm_rad = np.radians(fwhm_deg)
         theta_111 = np.radians(tth_111/2)
-        D_nm = float(0.9 * lam / (fwhm_rad * np.cos(theta_111)) / 10)
+        D_nm = float(K * lam / (fwhm_rad * np.cos(theta_111)) / 10)
     else:
         fwhm_deg, D_nm, tth_111 = None, None, None
 
-    # Check for CeO2 secondary phase
-    ceo2_positions = [28.55, 33.08, 47.48, 56.34]
+    # Check for secondary phases from config
     ceo2_detected = []
-    for pos in ceo2_positions:
-        mask_c = (tth >= pos-0.5) & (tth <= pos+0.5)
-        if mask_c.sum() > 0:
-            local_I = I[mask_c]
-            if local_I.max() > I.max() * 0.02:  # >2% of main peak
-                ceo2_detected.append({
-                    "2theta": pos,
-                    "relative_intensity": round(float(local_I.max()/I.max()), 3)
+    for phase_name, phase_cfg in cfg.xrd.secondary_phases.items():
+        for pos in phase_cfg.peak_positions_deg:
+            mask_c = (tth >= pos-0.5) & (tth <= pos+0.5)
+            if mask_c.sum() > 0:
+                local_I = I[mask_c]
+                if local_I.max() > I.max() * phase_cfg.detection_threshold:
+                    ceo2_detected.append({
+                        "phase": phase_name,
+                        "2theta": pos,
+                        "relative_intensity": round(float(local_I.max()/I.max()), 3)
                 })
 
+    mat = cfg.material
     return {
-        "phase_identified":       "LiMn2O4 spinel (Fd-3m)",
+        "phase_identified":       f"{mat.formula} {mat.structure_type} ({mat.space_group})",
         "n_peaks_assigned":       len(assigned_peaks),
         "assigned_peaks":         assigned_peaks,
         "lattice_parameter_A":    round(a0, 4),
@@ -310,8 +235,8 @@ def analyze_xrd_peaks(two_theta: list, intensity: list,
         "fwhm_111_deg":           round(fwhm_deg, 4) if fwhm_deg else None,
         "tth_111_deg":            round(float(tth_111), 4) if tth_111 is not None else None,
         "ceo2_secondary_phase":   ceo2_detected if ceo2_detected else "not detected",
-        "delta_a_vs_ICDD":        round(a0 - 8.2480, 4),
-        "note": "Negative delta_a common in nanoparticle LMO; systematic zero-error possible"
+        "delta_a_vs_ICDD":        round(a0 - mat.reference_lattice_A, 4),
+        "note": f"Negative delta_a common in nanoparticle {mat.formula}; systematic zero-error possible"
     }
 
 
@@ -375,15 +300,10 @@ def analyze_raman_peaks(wavenumber: list, intensity: list) -> dict:
     def lorentzian(x, x0, gamma, A):
         return A * gamma**2 / ((x-x0)**2 + gamma**2)
 
-    # LMO Raman mode windows
-    mode_windows = {
-        "A1g_Mn4O":  (610, 650),  # main peak ~625 cm-1
-        "A1g_Mn3O":  (560, 600),  # ~577 cm-1
-        "F2g_2":     (465, 500),  # ~483 cm-1
-        "Eg":        (420, 450),  # ~434 cm-1
-        "CeO2":      (455, 475),  # ~465 cm-1
-        "T2g_Li":    (150, 180),  # ~162 cm-1
-    }
+    # Raman mode windows from config
+    mode_windows = {}
+    for mode, (lo, hi) in cfg.raman.mode_windows.items():
+        mode_windows[mode] = (lo, hi)
 
     results = {}
     for mode, (lo, hi) in mode_windows.items():
@@ -412,9 +332,9 @@ def analyze_raman_peaks(wavenumber: list, intensity: list) -> dict:
     i625 = results.get("A1g_Mn4O", {}).get("intensity", 1)
     disorder_ratio = round(i577/i625, 3) if i625 > 0 else None
 
-    # A1g shift from pristine (628 cm-1 reference)
+    # A1g shift from pristine reference
     a1g_pos = results.get("A1g_Mn4O", {}).get("peak_position_cm1")
-    a1g_shift = round(a1g_pos - 628, 1) if a1g_pos else None
+    a1g_shift = round(a1g_pos - cfg.raman.reference_A1g_cm1, 1) if a1g_pos else None
 
     # CeO2 check
     ceo2 = results.get("CeO2", {})
@@ -500,16 +420,18 @@ def analyze_afm_data(z_matrix: list, pixel_size_nm: float = 1.0) -> dict:
     }
 
 
-def query_materials_project(formula: str = "LiMn2O4",
-                             mp_id: str = "mp-19017",
+def query_materials_project(formula: str = None,
+                             mp_id: str = None,
                              api_key: str = None) -> dict:
     """
     Fetch structure from Materials Project.
-    Always use mp-19017 for LiMn2O4 spinel (Fd-3m, conventional cell).
+    Defaults to the active material profile from config.toml.
     Returns structure summary + saves CIF to disk.
     api_key: from env MP_API_KEY if not provided.
     """
-    key = api_key or os.environ.get("MP_API_KEY", "")
+    formula = formula or cfg.material.formula
+    mp_id = mp_id or cfg.material.mp_id
+    key = api_key or cfg.get_api_key("mp") or ""
     if not key:
         return {"error": "MP_API_KEY not set. Set env variable or pass api_key parameter."}
 
@@ -519,7 +441,7 @@ def query_materials_project(formula: str = "LiMn2O4",
             # Get structure
             structure = mpr.get_structure_by_material_id(mp_id, conventional_unit_cell=True)
 
-        out_dir = Path("./atomInfer_output")
+        out_dir = Path(cfg.directories.output)
         out_dir.mkdir(exist_ok=True)
         cif_path = str(out_dir / f"base_{mp_id}.cif")
         structure.to(filename=cif_path, fmt="cif")
@@ -557,15 +479,17 @@ def search_materials_project(formula: str, max_results: int = 6, api_key: str = 
     """
     import requests
 
-    key = api_key or os.environ.get("MP_API_KEY", "")
+    key = api_key or cfg.get_api_key("mp") or ""
 
     # ── No API key: return sensible mock results ──────────────────────────────
     if not key:
+        mat = cfg.material
         mock = []
-        if 'Li' in formula and 'Mn' in formula:
-            mock = [
-                {"mp_id": "mp-19017", "formula": "LiMn2O4", "space_group": "Fd-3m", "lattice_a": 8.3120, "n_atoms": 56},
-            ]
+        # Provide a mock entry based on the active material profile
+        mock = [
+            {"mp_id": mat.mp_id, "formula": mat.formula,
+             "space_group": mat.space_group, "lattice_a": mat.reference_lattice_A, "n_atoms": 56},
+        ]
         return {"status": "mock", "results": mock, "note": "MP_API_KEY not set — showing demo results"}
 
     # ── Live search via MP REST API v3 ────────────────────────────────────────
@@ -645,42 +569,45 @@ def build_doped_supercell(base_cif_path: str,
                               [s.frac_coords for s in structure])
 
         # Determine supercell size
+        max_sc = cfg.structure.max_supercell_dim
         if supercell_hint:
             sc = supercell_hint
         elif crystallite_size_nm:
             # Edge length in Angstroms
             target_A = crystallite_size_nm * 10
             n = max(1, round(target_A / measured_lattice_a))
-            n = min(n, 4)  # cap at 4x4x4 for tractability
+            n = min(n, max_sc)
             sc = [n, n, n]
         else:
-            sc = [2, 2, 2]
+            sc = list(cfg.structure.default_supercell)
 
         structure.make_supercell(sc)
         n_total = len(structure)
 
-        # Find Mn sites (16d in supercell)
+        # Find host element sites for doping
+        host_el = cfg.material.doping.host_element
         mn_indices = [i for i, site in enumerate(structure)
-                      if str(site.specie) == "Mn"]
+                      if str(site.specie) == host_el]
         n_mn = len(mn_indices)
         n_ce = max(1, round(Ce_fraction * n_mn)) if Ce_fraction > 0 else 0
         n_ce = min(n_ce, n_mn)
 
         # Random substitution (deterministic seed for reproducibility)
-        rng = np.random.default_rng(seed=42)
+        rng = np.random.default_rng(seed=cfg.material.doping.seed)
         ce_indices = rng.choice(mn_indices, size=n_ce, replace=False)
 
-        # Apply substitution
+        # Apply substitution — use first allowed dopant
+        dopant = cfg.material.doping.allowed_dopants[0] if cfg.material.doping.allowed_dopants else "Ce"
         species = [str(s.specie) for s in structure]
         for idx in ce_indices:
-            species[idx] = "Ce"
+            species[idx] = dopant
 
         new_structure = Structure(structure.lattice,
                                    species,
                                    [s.frac_coords for s in structure])
 
         # Save outputs
-        out_dir = Path("./atomInfer_output")
+        out_dir = Path(cfg.directories.output)
         out_dir.mkdir(exist_ok=True)
         ce_label = f"Ce{int(Ce_fraction*100)}pct"
         sc_label  = f"{sc[0]}x{sc[1]}x{sc[2]}"
@@ -714,7 +641,7 @@ def build_doped_supercell(base_cif_path: str,
 def compute_xrd_r_factor(structure_path: str,
                           two_theta_exp: list,
                           intensity_exp: list,
-                          wavelength_A: float = 1.54059) -> dict:
+                          wavelength_A: float = None) -> dict:
     """
     Compute XRD R-factor between built structure and experimental pattern.
     R = Σ|I_obs - I_calc| / Σ|I_obs|
@@ -724,10 +651,13 @@ def compute_xrd_r_factor(structure_path: str,
     if not fp.exists():
         return {"error": f"Structure file not found: {structure_path}"}
 
+    lam = wavelength_A if wavelength_A is not None else cfg.xrd.wavelength_A
+    ang_lo, ang_hi = cfg.xrd.angular_range_deg
+
     try:
         structure = Structure.from_file(str(fp))
         calc = XRDCalculator(wavelength="CuKa")
-        pattern_sim = calc.get_pattern(structure, two_theta_range=(15, 70))
+        pattern_sim = calc.get_pattern(structure, two_theta_range=(ang_lo + 5, ang_hi - 10))
 
         tth_exp = np.array(two_theta_exp)
         I_exp   = np.array(intensity_exp)
@@ -750,8 +680,7 @@ def compute_xrd_r_factor(structure_path: str,
         return {
             "R_factor":      round(R, 4),
             "R_factor_pct":  round(R*100, 2),
-            "quality":       "excellent" if R<0.1 else "good" if R<0.2 else
-                             "acceptable" if R<0.3 else "poor - consider HRMC refinement",
+            "quality":       cfg.xrd.r_factor.quality_label(R),
             "n_atoms":       len(structure),
             "top_sim_peaks": top_peaks,
             "interpretation": "R-factor measures agreement between simulated and experimental XRD"
@@ -871,12 +800,12 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "query_materials_project",
-            "description": "Fetch base crystal structure from Materials Project. Always use mp-19017 for LiMn2O4.",
+            "description": "Fetch base crystal structure from Materials Project for the configured material.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "formula":  {"type": "string", "default": "LiMn2O4"},
-                    "mp_id":    {"type": "string", "default": "mp-19017"},
+                    "formula":  {"type": "string", "description": "Chemical formula (default: from config)"},
+                    "mp_id":    {"type": "string", "description": "Materials Project ID (default: from config)"},
                     "api_key":  {"type": "string", "description": "MP API key (optional if env set)"}
                 },
                 "required": []
@@ -887,7 +816,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "build_doped_supercell",
-            "description": "Build Ce-doped LiMn2O4 supercell from MP structure. Scales lattice to measured value, substitutes Ce at Mn sites.",
+            "description": "Build doped supercell from MP structure. Scales lattice to measured value, substitutes dopant at host sites.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -926,25 +855,42 @@ TOOLS = [
 # =============================================================================
 
 def run_agent(user_request: str,
-              client,
-              model: str,
+              client=None,
+              model: str = None,
               verbose: bool = True,
-              max_iterations: int = 15) -> str:
+              max_iterations: int = None,
+              task: str = "general_reasoning") -> str:
+
+    # Use model registry if client not provided
+    if client is None:
+        llm_client, model = registry.get_client_for_task(task)
+    else:
+        llm_client = client
+
+    max_iter = max_iterations or cfg.llm.max_iterations
 
     messages = [
         {"role": "system",  "content": SYSTEM_PROMPT},
         {"role": "user",    "content": user_request}
     ]
 
-    for iteration in range(max_iterations):
-        response = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice="auto",
-            temperature=0.05,
-            max_tokens=4096,
-        )
+    for iteration in range(max_iter):
+        # Use unified client interface if available, else raw client
+        if hasattr(llm_client, 'chat_completion'):
+            response = llm_client.chat_completion(
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+            )
+        else:
+            response = llm_client.chat.completions.create(
+                model=model,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice="auto",
+                temperature=cfg.llm.temperature,
+                max_tokens=cfg.llm.max_tokens,
+            )
 
         msg = response.choices[0].message
 
@@ -1024,11 +970,13 @@ if __name__ == "__main__":
     parser.add_argument("--raman",    type=str, default=None, help="Raman file path")
     parser.add_argument("--afm",      type=str, default=None, help="AFM file path")
     parser.add_argument("--demo",     action="store_true", help="Run all sheets in demo mode")
-    parser.add_argument("--local",    action="store_true", help="Use local Ollama instead of Groq")
+    parser.add_argument("--config",   type=str, default=None, help="Path to config.toml")
     parser.add_argument("--verbose",  action="store_true", default=True)
     args = parser.parse_args()
 
-    client, model = get_llm_client(prefer_local=args.local)
+    # Refresh model availability and select
+    registry.refresh_availability()
+    client, model = get_llm_client(task="general_reasoning")
 
     if args.demo and args.xrd:
         xl = pd.ExcelFile(args.xrd)
@@ -1071,6 +1019,10 @@ if __name__ == "__main__":
         print("Usage: python atomInfer_v2.py --xrd YOUR_FILE.xlsx --sheet 'Sheet Name'")
         print("       python atomInfer_v2.py --demo --xrd YOUR_FILE.xlsx")
         print("       python atomInfer_v2.py --xrd file.xlsx --raman raman.txt --afm afm.txt")
-        print("\nEnvironment variables needed:")
-        print("  GROQ_API_KEY  — from console.groq.com (free)")
-        print("  MP_API_KEY    — from materialsproject.org (free academic)")
+        print("\nConfiguration:")
+        print("  Edit config.toml (copy from config.default.toml)")
+        print("  Set LLM models, material profiles, and API keys")
+        print("\nEnvironment variables (optional, override config.toml):")
+        print("  GROQ_API_KEY    — from console.groq.com")
+        print("  OPENAI_API_KEY  — from platform.openai.com")
+        print("  MP_API_KEY      — from materialsproject.org")

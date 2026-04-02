@@ -7,10 +7,10 @@ The frontend connects via WebSocket, sends a job spec,
 and receives streaming JSON events as the agent runs.
 
 Run:
-  pip install fastapi uvicorn python-multipart
-  export GROQ_API_KEY=...
-  export MP_API_KEY=...
-  uvicorn backend_server:app --reload --host 0.0.0.0 --port 8000
+  python backend_server.py
+  # or: uvicorn backend_server:app --reload --host 0.0.0.0 --port 8000
+
+All settings are read from config.toml (see config.default.toml).
 """
 
 import os, json, asyncio, uuid, traceback
@@ -29,6 +29,11 @@ try:
 except Exception:
     pass
 
+# Load configuration and model registry
+from config_loader import cfg
+from model_registry import registry
+from materials import get_active_material
+
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -43,13 +48,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Output directory for generated structures and plots
-OUTPUT_DIR = Path("./atomInfer_output")
+# Directories from config
+OUTPUT_DIR = Path(cfg.directories.output)
 OUTPUT_DIR.mkdir(exist_ok=True)
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT_DIR)), name="outputs")
 
-# Upload directory
-UPLOAD_DIR = Path("./uploads")
+UPLOAD_DIR = Path(cfg.directories.uploads)
 UPLOAD_DIR.mkdir(exist_ok=True)
 
 # In-memory run store: run_id → queue of events
@@ -158,14 +162,12 @@ async def create_run(body: dict):
                 }
             })
 
-            # Estimate Ce fraction from lattice using Vegard's law approximation
-            # Calibrated from Nikhil's data: a increases ~0.035 Å per 1% Ce (from 1-2% Ce)
-            # This is a rough estimate — the agent will refine it
-            a_pristine = 8.2480  # ICDD reference
-            ce_frac = max(0.0, min(0.10, (lattice_a - a_pristine) / 0.35))
+            # Estimate Ce fraction from lattice using Vegard's law from config
+            mat = get_active_material()
+            ce_frac = mat.estimate_dopant_fraction(lattice_a)
             await q.put({
                 "type": "event",
-                "label": "Ce fraction estimated from Vegard's law",
+                "label": "Dopant fraction estimated from Vegard's law",
                 "data": {
                     "ce_fraction": round(ce_frac, 4),
                     "ce_pct":      round(ce_frac*100, 2),
@@ -174,8 +176,9 @@ async def create_run(body: dict):
             })
 
             # ── STEP 3: Materials Project query ──────────────────────────────
+            mp_id = cfg.material.mp_id
             await q.put({"type": "step", "step": 3,
-                         "label": "Fetching base structure from Materials Project (mp-19017)...",
+                         "label": f"Fetching base structure from Materials Project ({mp_id})...",
                          "icon": "🌐"})
             await asyncio.sleep(0.05)
 
@@ -331,10 +334,13 @@ async def serve_ui():
 # ── Health check ──────────────────────────────────────────────────────────────
 @app.get("/health")
 def health():
+    registry.refresh_availability()
     return {
         "status": "ok",
-        "groq_key": bool(os.environ.get("GROQ_API_KEY")),
-        "mp_key":   bool(os.environ.get("MP_API_KEY")),
+        "groq_key": bool(cfg.get_api_key("groq")),
+        "mp_key":   bool(cfg.get_api_key("mp")),
+        "config":   cfg.to_summary_dict(),
+        "models":   registry.get_status_summary(),
     }
 
 
@@ -342,11 +348,9 @@ def health():
 @app.get("/api/mp_structure/{mp_id}")
 async def get_mp_structure(mp_id: str):
     """Return full site list + lattice for a given MP id so the browser can
-    render it with Three.js.  The `structure` field from the summary endpoint
-    is a pymatgen-serialised JSON object that includes lattice matrix and sites
-    with Cartesian (xyz) and fractional (abc) coordinates."""
+    render it with Three.js."""
     import requests
-    key = os.environ.get("MP_API_KEY", "")
+    key = cfg.get_api_key("mp") or ""
     if not key:
         return JSONResponse({"error": "MP_API_KEY not set"}, status_code=503)
     headers = {"X-API-KEY": key, "accept": "application/json"}
@@ -475,11 +479,12 @@ async def hrmc_frames_endpoint(body: dict):
 def structure_to_viewer_json(structure) -> dict:
     """Convert a pymatgen Structure to the Three.js viewer format used by /api/mp_structure/."""
     lat = structure.lattice
+    mat = cfg.material
     return {
         "material_id": "hrmc",
         "formula": structure.formula,
         "nsites": len(structure),
-        "symmetry": {"symbol": "Fd-3m", "crystal_system": "cubic"},
+        "symmetry": {"symbol": mat.space_group, "crystal_system": mat.crystal_system},
         "lattice": {
             "matrix": lat.matrix.tolist(),
             "a": float(lat.a), "b": float(lat.b), "c": float(lat.c),
@@ -536,13 +541,13 @@ async def hrmc_start(body: dict):
 
         cif_path  = body.get("cif_path", "./LiMn2O4.cif")
         ce_pct    = float(body.get("ce_pct", 5.0))
-        n_steps   = int(body.get("n_steps", 100))
+        n_steps   = int(body.get("n_steps", cfg.hrmc.default_steps))
         supercell = body.get("supercell", [1, 1, 1])
         x_ce      = ce_pct / 100.0
 
-        # Configuration for smooth updates
-        XRD_INTERVAL   = 5    # recompute XRD pattern every N steps
-        TARGET_FPS     = 15   # target frames per second (67ms/frame)
+        # Configuration from config.toml
+        XRD_INTERVAL   = cfg.hrmc.xrd_interval
+        TARGET_FPS     = cfg.hrmc.target_fps
         FRAME_DELAY    = 1.0 / TARGET_FPS
 
         async def emit(data):
@@ -560,20 +565,22 @@ async def hrmc_start(body: dict):
                 await asyncio.to_thread(structure.make_supercell, supercell)
 
             sp_list = [str(s.specie) for s in structure]
-            mn_idx  = [i for i, sp in enumerate(sp_list) if sp == "Mn"]
+            host_el = cfg.material.doping.host_element
+            mn_idx  = [i for i, sp in enumerate(sp_list) if sp == host_el]
             n_ce_init = max(1, int(x_ce * len(mn_idx))) if x_ce > 0 and mn_idx else 0
             
+            dopant_el = cfg.material.doping.allowed_dopants[0] if cfg.material.doping.allowed_dopants else "Ce"
             if n_ce_init:
                 chosen = np.random.choice(mn_idx, n_ce_init, replace=False)
                 for idx in chosen:
-                    structure[int(idx)] = "Ce"
+                    structure[int(idx)] = dopant_el
 
             await emit({"type": "status",
                   "message": f"Loaded {structure.formula} ({len(structure)} atoms)"})
 
             # ── STEP 2: Initialize MEAM Calculator ──────────────────────────
             await emit({"type": "status", "message": "Initializing MEAM calculator..."})
-            meam = MEAMCalculator(rcut=4.8)
+            meam = MEAMCalculator(rcut=cfg.potentials.cutoff_radius_A)
 
             # ── STEP 3: Build synthetic target XRD ──────────────────────────
             await emit({"type": "status", "message": "Building target XRD pattern..."})
@@ -612,14 +619,13 @@ async def hrmc_start(body: dict):
                 return R, sim_n.tolist()
 
             def calc_meam_cost(s, R_cached):
-                """Cost using R-factor + Ce constraint. MEAM is computed for display only."""
+                """Cost using R-factor + composition constraint. MEAM is computed for display only."""
                 E   = meam.compute_energy(s) / len(s)
                 sp_ = [str(st.specie) for st in s]
-                nCe = sp_.count("Ce"); nMn = sp_.count("Mn")
+                nCe = sp_.count(dopant_el); nMn = sp_.count(host_el)
                 xc  = nCe / (nCe + nMn) if (nCe + nMn) > 0 else 0
-                # Use only R-factor + Ce constraint for MC acceptance
-                # (MEAM potential not calibrated for Li-Mn-O, so E is display-only)
-                F   = 1.0*R_cached + 5.0*(xc - x_ce)**2
+                # Use only R-factor + composition constraint for MC acceptance
+                F   = w_xrd*R_cached + w_ce*(xc - x_ce)**2
                 return {"F": F, "R_factor": R_cached, "E_per_atom": E, "x_Ce": xc}
 
             def metropolis(dF, T):
@@ -641,7 +647,12 @@ async def hrmc_start(body: dict):
             # ── STEP 5: MC Loop ─────────────────────────────────────────────
             await emit({"type": "status", "message": f"Starting MC loop ({n_steps} steps)..."})
             
-            T_start, T_end = 0.1, 0.01
+            T_start = cfg.hrmc.temperature.start
+            T_end   = cfg.hrmc.temperature.end
+            disp_w  = cfg.hrmc.moves.displacement_weight
+            max_disp = cfg.hrmc.moves.max_displacement_A
+            w_xrd   = cfg.hrmc.cost_weights.xrd
+            w_ce    = cfg.hrmc.cost_weights.ce_target
             last_emit_time = asyncio.get_event_loop().time()
             
             for step in range(n_steps):
@@ -649,31 +660,31 @@ async def hrmc_start(body: dict):
                 roll = np.random.random()
                 trial = None
 
-                # Displacement move (70%): move a random non-Li atom
-                if roll < 0.7:
+                # Displacement move
+                if roll < disp_w:
                     sp_ = [str(st.specie) for st in current]
                     cands = [i for i, sp in enumerate(sp_) if sp != "Li"]
                     if cands:
                         trial = current.copy()
                         idx   = int(np.random.choice(cands))
-                        disp  = np.random.uniform(-0.5, 0.5, 3)  # 0.5Å — visible in viewer
+                        disp  = np.random.uniform(-max_disp, max_disp, 3)
                         trial.translate_sites([idx], disp, frac_coords=False)
-                # Swap move (30%): Ce<->Mn substitution
+                # Swap move: dopant<->host substitution
                 else:
                     sp_ = [str(st.specie) for st in current]
-                    nCe = sp_.count("Ce"); nMn = sp_.count("Mn")
+                    nCe = sp_.count(dopant_el); nMn = sp_.count(host_el)
                     x_cur = nCe / (nCe + nMn) if (nCe + nMn) > 0 else 0
                     trial = current.copy()
                     if x_cur < x_ce:
-                        mn_cands = [i for i, sp in enumerate(sp_) if sp == "Mn"]
+                        mn_cands = [i for i, sp in enumerate(sp_) if sp == host_el]
                         if mn_cands:
-                            trial[int(np.random.choice(mn_cands))] = "Ce"
+                            trial[int(np.random.choice(mn_cands))] = dopant_el
                         else:
                             trial = None
                     else:
-                        ce_cands = [i for i, sp in enumerate(sp_) if sp == "Ce"]
+                        ce_cands = [i for i, sp in enumerate(sp_) if sp == dopant_el]
                         if ce_cands:
-                            trial[int(np.random.choice(ce_cands))] = "Mn"
+                            trial[int(np.random.choice(ce_cands))] = host_el
                         else:
                             trial = None
 
@@ -737,6 +748,42 @@ async def hrmc_stream(websocket: WebSocket, run_id: str):
             pass
 
 
+# ── Configuration & Material endpoints ─────────────────────────────────────────
+
+@app.get("/api/config")
+async def get_config():
+    """Return active configuration summary for the frontend UI."""
+    registry.refresh_availability()
+    return {
+        "config": cfg.to_summary_dict(),
+        "models": registry.get_status_summary(),
+    }
+
+
+@app.get("/api/materials/list")
+async def list_materials_endpoint():
+    """Return all configured material profiles."""
+    from materials import list_materials
+    return {"materials": list_materials(), "active": cfg.material.name}
+
+
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("backend_server:app", host="0.0.0.0", port=8000, reload=True)
+    import uvicorn, webbrowser, threading
+
+    def _open_browser():
+        """Wait briefly for the server to start, then open the UI."""
+        import time, urllib.request
+        url = f"http://localhost:{cfg.server.port}"
+        for _ in range(20):
+            time.sleep(0.5)
+            try:
+                urllib.request.urlopen(f"{url}/health")
+                break
+            except Exception:
+                continue
+        webbrowser.open(url)
+
+    if cfg.server.open_browser:
+        threading.Thread(target=_open_browser, daemon=True).start()
+    uvicorn.run("backend_server:app", host=cfg.server.host,
+                port=cfg.server.port, reload=True)

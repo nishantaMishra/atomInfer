@@ -1,4 +1,6 @@
 .env
+config.toml
 __pycache__/
 atomInfer_output/
 uploads/
+models/

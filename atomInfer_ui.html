@@ -236,11 +236,11 @@ canvas.mini-chart{width:100%;height:100%;display:block;}
     </div>
     <div class="section">
       <div class="section-label">Agent Settings</div>
-      <div style="font-family:'Space Mono',monospace;font-size:11px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;">
-        <span style="color:var(--text-dim);">LLM</span><span style="color:var(--text);">llama-3.3-70b</span>
-        <span style="color:var(--text-dim);">provider</span><span style="color:var(--text);">Groq API</span>
-        <span style="color:var(--text-dim);">temp</span><span style="color:var(--text);">0.05</span>
-        <span style="color:var(--text-dim);">max_iter</span><span style="color:var(--text);">15</span>
+      <div id="agentSettingsPanel" style="font-family:'Space Mono',monospace;font-size:11px;display:grid;grid-template-columns:auto 1fr;gap:4px 14px;">
+        <span style="color:var(--text-dim);">LLM</span><span id="cfgLlmModel" style="color:var(--text);">loading...</span>
+        <span style="color:var(--text-dim);">provider</span><span id="cfgLlmProvider" style="color:var(--text);">—</span>
+        <span style="color:var(--text-dim);">material</span><span id="cfgMaterial" style="color:var(--text);">—</span>
+        <span style="color:var(--text-dim);">models</span><span id="cfgModelsStatus" style="color:var(--accent2);">—</span>
         <span style="color:var(--text-dim);">tools</span><span style="color:var(--accent2);">9 registered</span>
       </div>
     </div>
@@ -534,7 +534,7 @@ function showResultsPanel(){
 }
 function updateMetrics(data){
   const a=data.lattice.toFixed(4);
-  const delta=(data.lattice-8.2480).toFixed(4);
+  const delta=(data.lattice-_cfgRef.icdd_lattice).toFixed(4);
   const dStr=delta>=0?`+${delta}`:String(delta);
   const dClass=delta>=0?'up':'dn';
   document.getElementById('rLattice').innerHTML=`${a}<span class="metric-unit">Å</span>`;
@@ -596,7 +596,8 @@ function drawXRDChart(ce){
 }
 
 // ---------- Materials Project live search while typing domain knowledge ----------
-const MP_API_KEY = '6knKaDCz1C5biyGIizRthNsSrMhwCKIF';
+// API key is managed server-side via config.toml / env vars — no client exposure
+let _mpApiKey = '';   // populated from /api/config at startup
 const MP_BASE    = 'https://api.materialsproject.org';
 
 function debounce(fn, wait){let t;return function(...args){clearTimeout(t);t=setTimeout(()=>fn.apply(this,args), wait);};}
@@ -1162,7 +1163,7 @@ async function startAnalysis(){
   await addMsg('agent','ATOMINFER AGENT','🤖',`Data parsed successfully. Now assigning hkl indices using LiMn₂O₄ Fd-3̄m reflection rules. Expecting peaks at: (111)≈18.9°, (311)≈36.5°, (400)≈44.4°, (511)≈58.8°, (440)≈64.5°. Applying Nelson-Riley extrapolation + Scherrer equation from (111) FWHM.`);
   await addToolCall('analyze_xrd_peaks',`two_theta = [array, 1622 pts]\nintensity  = [array, 1622 pts]\nwavelength_A = 1.54059`,300);
   await sleep(1100);
-  const a=data.lattice,D=data.size,deltaA=(a-8.2480).toFixed(4);
+  const a=data.lattice,D=data.size,deltaA=(a-_cfgRef.icdd_lattice).toFixed(4);
   await addToolResult(`<div class="kv-grid"><span class="kv-key">phase</span><span class="kv-val highlight">LiMn₂O₄ spinel (Fd-3̄m)</span><span class="kv-key">peaks found</span><span class="kv-val">6/6 expected</span><span class="kv-key">lattice_a</span><span class="kv-val highlight">${a.toFixed(4)} Å</span><span class="kv-key">NR quality</span><span class="kv-val">good (6 peaks)</span><span class="kv-key">Δa vs ICDD</span><span class="kv-val warn">${deltaA} Å</span><span class="kv-key">crystallite D</span><span class="kv-val highlight">${D.toFixed(1)} nm</span><span class="kv-key">CeO₂ phase</span><span class="kv-val">not detected</span></div>`,200);
 
   showResultsPanel();updateMetrics(data);
@@ -1205,7 +1206,7 @@ async function startAnalysis(){
   await addMsg('agent','ATOMINFER AGENT','🤖',
     `<strong>Analysis complete.</strong><br><br>📋 <strong>Summary for ${sN}:</strong><br>`+
     `• Phase: LiMn₂O₄ spinel (Fd-3̄m), single phase<br>`+
-    `• Lattice a = ${a.toFixed(4)} Å (Δ = ${deltaA} Å vs ICDD 8.2480 Å)<br>`+
+    `• Lattice a = ${a.toFixed(4)} Å (Δ = ${deltaA} Å vs ICDD ${_cfgRef.icdd_lattice} Å)<br>`+
     `• Crystallite D = ${D.toFixed(0)} nm (Scherrer from (111))<br>`+
     `• Ce fraction: ${data.ce}% substituted at Mn 16d sites<br>`+
     `• Supercell: ${scN}×${scN}×${scN}, ${total} atoms<br>`+
@@ -1434,6 +1435,46 @@ async function runHRMC() {
   };
 }
 // ====== END HRMC ======
+
+// ── Fetch config from backend at startup ──────────────────────────────────────
+let _cfgRef = { icdd_lattice: 8.2480 };  // defaults until /api/config responds
+
+(async function loadConfig(){
+  try{
+    const r = await fetch('/api/config');
+    if(!r.ok) return;
+    const d = await r.json();
+    const c = d.config || {};
+
+    // Agent Settings panel — derive default model info from llm_models
+    const models = c.llm_models || {};
+    const firstModel = Object.values(models)[0] || {};
+    document.getElementById('cfgLlmModel').textContent   = firstModel.model || '—';
+    document.getElementById('cfgLlmProvider').textContent = firstModel.provider || '—';
+
+    // Material
+    document.getElementById('cfgMaterial').textContent = c.material_formula || c.active_material || '—';
+
+    // Model availability indicator
+    const mStatus = d.models || {};
+    const avail = mStatus.available_models || [];
+    const el = document.getElementById('cfgModelsStatus');
+    if(avail.length > 0){
+      el.textContent = `${avail.length} available`;
+      el.style.color = 'var(--accent2)';
+    } else {
+      el.textContent = 'none detected';
+      el.style.color = '#f44';
+    }
+
+    // Store reference lattice for UI calculations
+    if(c.reference_lattice_A) _cfgRef.icdd_lattice = c.reference_lattice_A;
+
+    // MP API key (if exposed for direct client queries — typically empty)
+    if(c.api_keys?.mp) _mpApiKey = c.api_keys.mp;
+
+  }catch(e){ console.warn('Could not load /api/config:', e); }
+})();
 </script>
 </body>
 </html>
